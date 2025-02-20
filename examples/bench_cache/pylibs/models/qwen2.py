@@ -1,4 +1,4 @@
-from transformers.models.qwen2.modeling_qwen2 import Qwen2Attention,Qwen2Model,Qwen2DecoderLayer,Qwen2ForCausalLM,apply_rotary_pos_emb,eager_attention_forward,ALL_ATTENTION_FUNCTIONS,Qwen2Config
+from transformers.models.qwen2.modeling_qwen2 import Qwen2Attention,Qwen2Model,Qwen2DecoderLayer,Qwen2ForCausalLM,apply_rotary_pos_emb,eager_attention_forward,ALL_ATTENTION_FUNCTIONS,Qwen2Config,KwargsForCausalLM
 
 import torch
 import torch.nn as nn
@@ -19,7 +19,7 @@ from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import (AttentionBias,
                                          BlockDiagonalCausalMask,
                                          BlockDiagonalMask,
-                                         LowerTriangularMaskWithTensorBias,LowerTriangularFromBottomRightMask)
+                                         LowerTriangularMaskWithTensorBias,LowerTriangularMask,LowerTriangularFromBottomRightMask)
 
 import json
 from transformers.generation.utils import GenerationConfig,GenerateNonBeamOutput,GenerateEncoderDecoderOutput,GenerateDecoderOnlyOutput,GenerateEncoderDecoderOutput
@@ -64,6 +64,8 @@ def sdpa_attention_forward(
     dropout: float = 0.0,
     scaling: Optional[float] = None,
     is_causal: Optional[bool] = None,
+    cache_metadata = None,
+    layer_idx = None,
     **kwargs,
 ) -> Tuple[torch.Tensor, None]:
 
@@ -88,6 +90,21 @@ def sdpa_attention_forward(
     if is_causal is None:
         is_causal = causal_mask is None and query.shape[2] > 1
 
+    # if cache_metadata["cache_blend"]["check"] and cache_metadata["is_prefill"] and (layer_idx > cache_metadata["cache_blend"]["check_layers"][-1] or layer_idx in cache_metadata["cache_blend"]["check_layers"]):
+    #     attn_output = query
+    #     tmp_query = query[:,:,cache_metadata["cache_blend"]["imp_indices"],:]
+    #     tmp_a = torch.nn.functional.scaled_dot_product_attention(
+    #         tmp_query,
+    #         key,
+    #         value,
+    #         attn_mask=causal_mask,
+    #         dropout_p=dropout,
+    #         scale=scaling,
+    #         is_causal=is_causal,
+    #     )
+    #     attn_output[:,:,cache_metadata["cache_blend"]["imp_indices"],:] = tmp_a
+    #     attn_output = attn_output.transpose(1, 2).contiguous()
+    # else:
     attn_output = torch.nn.functional.scaled_dot_product_attention(
         query,
         key,
@@ -99,14 +116,93 @@ def sdpa_attention_forward(
     )
     attn_output = attn_output.transpose(1, 2).contiguous()
     
+    # attn_output = attn_output.reshape(attn_output.shape[0],-1,self.num_head*self.head_dim).contiguous()
 
     return attn_output, None
 
+def run_memory_efficient_xformers_forward(
+        module: torch.nn.Module,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        dropout: float = 0.0,
+        scaling: Optional[float] = None,
+        is_causal: Optional[bool] = None,
+        **kwargs,
+    ):
+    # if hasattr(module, "num_key_value_groups"):
+    #     key = repeat_kv(key, module.num_key_value_groups)
+    #     value = repeat_kv(value, module.num_key_value_groups)
+
+    n, seq_len,_, dim = query.shape
+    num_group = module.num_attention_heads//module.num_key_value_heads
+    num_head_per_group = module.num_key_value_heads
+    
+    def repeat_kv2(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+        """正确实现键值头重复"""
+        batch, seq_len, n_kv_heads, head_dim = hidden_states.shape
+        if n_rep == 1:
+            return hidden_states
+        hidden_states = hidden_states[:, :, :, None, :].expand(
+            batch, seq_len, n_kv_heads, n_rep, head_dim
+        )
+        return hidden_states.reshape(batch, seq_len, n_kv_heads * n_rep, head_dim)
+    
+     # 确保输入维度正确 [batch, seq_len, heads, dim]
+    def reshape_for_gqa(tensor, num_heads):
+        return tensor.reshape(
+            tensor.shape[0], 
+            tensor.shape[1], 
+            num_heads, 
+            -1
+        ).contiguous()
+
+    key = repeat_kv2(key, num_group)
+    value = repeat_kv2(value,num_group)
+    # query = query.reshape(n, seq_len, -1, dim).contiguous()
+    # key = repeat_kv2(key, num_group).contiguous()
+    # value = repeat_kv2(value, num_group).contiguous()
+    # 调整形状为xFormers期望格式
+    query = reshape_for_gqa(query, module.num_attention_heads)
+    key = reshape_for_gqa(key, module.num_attention_heads)
+    value = reshape_for_gqa(value, module.num_attention_heads)
+
+    # scale_factor = 1.0 / (query.size(-1) ** 0.5) if scaling is None else scaling
+    # attn_bias = LowerTriangularFromBottomRightMask()
+    # attn_bias = None
+    # if attention_mask is not None:
+    #     if is_causal:
+    #         # 融合因果掩码和输入掩码
+    #         attn_bias = xops.LowerTriangularMask() 
+    #         attn_bias = attn_bias.masked_fill(~attention_mask, -float("inf"))
+    #     else:
+    #         attn_bias = xops.fmha.BlockDiagonalMask.from_seqlens(
+    #             [attention_mask.size(1)] * attention_mask.size(0)
+    #         )
+    # elif is_causal:
+    #     attn_bias = xops.LowerTriangularMask()
+
+    out = xops.memory_efficient_attention(
+        query,
+        key,
+        value,
+        attn_bias=LowerTriangularFromBottomRightMask(),
+        p=0.0,
+        # scale=None,
+        scale=None,  # 因为我们已经在上面应用了缩放
+    )
+
+    # 恢复原始形状 [batch, heads, seq_len, dim]
+    out = out.reshape(n, seq_len, -1).contiguous()
+    
+    return out
 
 class CustomQwen2Attention(Qwen2Attention):
     def __init__(self,config:Qwen2Config, layer_idx: int):
         super().__init__(config,layer_idx)
-        self.num_head = config.num_attention_heads
+        self.num_attention_heads = config.num_attention_heads
+        self.num_key_value_heads = config.num_key_value_heads
         self.hack_kv = []
 
     def forward(
@@ -134,7 +230,7 @@ class CustomQwen2Attention(Qwen2Attention):
             query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
             key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
             value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-            
+                    
   
         if cache_metadata["cache_blend"]["collect"] and cache_metadata["is_prefill"]:
             self.hack_kv = [key_states.clone(),value_states.clone()]
@@ -209,22 +305,37 @@ class CustomQwen2Attention(Qwen2Attention):
         ):
             sliding_window = self.config.sliding_window
 
-        attn_output, attn_weights = sdpa_attention_forward(
+        # attn_output, attn_weights = sdpa_attention_forward(
+        #     self,
+        #     query_states,
+        #     key_states,
+        #     value_states,
+        #     attention_mask,
+        #     dropout=0.0 if not self.training else self.attention_dropout,
+        #     scaling=self.scaling,
+        #     sliding_window=sliding_window,  # main diff with Llama
+        #     cache_metadata = cache_metadata,
+        #     layer_idx = self.layer_idx,
+        #     **kwargs,
+        # )
+        # attn_output = attn_output.reshape(attn_output.shape[0],-1,self.num_head*self.head_dim).contiguous()
+     
+        
+        attn_output = run_memory_efficient_xformers_forward(
             self,
-            query_states,
-            key_states,
-            value_states,
+            query_states.transpose(1,2),
+            key_states.transpose(1,2),
+            value_states.transpose(1,2),
             attention_mask,
             dropout=0.0 if not self.training else self.attention_dropout,
-            scaling=self.scaling,
-            sliding_window=sliding_window,  # main diff with Llama
-            **kwargs,
+            scaling=0.08838834764831845,
+            is_causal=None,
         )
     
-        # reshape to [batch,seq_len,dim]
-        attn_output = attn_output.reshape(attn_output.shape[0],-1,self.num_head*self.head_dim).contiguous()
+        # # reshape to [batch,seq_len,dim]
+        
         attn_output = self.o_proj(attn_output)
-        return attn_output, attn_weights
+        return attn_output, None
     
     
 class CustomQwen2DecoderLayer(Qwen2DecoderLayer):
@@ -266,8 +377,9 @@ class CustomQwen2DecoderLayer(Qwen2DecoderLayer):
         
         
         # if cache_metadata["cache_blend"]["check"] and cache_metadata["is_prefill"] and self.layer_idx in cache_metadata["cache_blend"]["check_layers"]:
-        #     if hidden_states.shape[1]  == len(cache_metadata["cache_blend"]["imp_indices"]):
-        #         residual = residual[:,cache_metadata["cache_blend"]["imp_indices"],:]
+        #     if cache_metadata["cache_blend"]["imp_indices"] is not None:
+        #         # 确保residual的维度与hidden_states匹配
+        #         residual = residual[:, cache_metadata["cache_blend"]["imp_indices"], :]
         
         hidden_states = residual + hidden_states
 
@@ -296,8 +408,8 @@ class CustomQwen2Model(Qwen2Model):
             "cache_blend": {
                 "check_layers":[1],
                 "check": False,
-                "recomp_ratios":[0.3],
-                "recomp_ratio": 0.3,
+                "recomp_ratios":[0.1],
+                "recomp_ratio": 0.1,
                 "original_slot_mapping":None,
                 "our_slot_mapping":None,
                 "kv_cache_dtype": None,
@@ -410,9 +522,19 @@ class CustomQwen2Model(Qwen2Model):
                     cache_metadata=self.cache_fuse_metadata,
                     **flash_attn_kwargs,
                 )
-            if self.cache_fuse_metadata["cache_blend"]["check"] and self.cache_fuse_metadata["is_prefill"] and (layer_idx in self.cache_fuse_metadata["cache_blend"]["check_layers"] or layer_idx > self.cache_fuse_metadata["cache_blend"]["check_layers"][-1]):
-                self.cache_fuse_metadata["cache_blend"]["imp_position_ids"] = position_ids[:,self.cache_fuse_metadata["cache_blend"]["imp_indices"]]
-                self.cache_fuse_metadata["cache_blend"]["imp_position_embeddings"] = self.rotary_emb(hidden_states[:,self.cache_fuse_metadata["cache_blend"]["imp_indices"],:], self.cache_fuse_metadata["cache_blend"]["imp_position_ids"])
+            if self.cache_fuse_metadata["cache_blend"]["check"] and self.cache_fuse_metadata["is_prefill"] and layer_idx in self.cache_fuse_metadata["cache_blend"]["check_layers"]:
+                # 确保imp_indices存在且有效
+                if self.cache_fuse_metadata["cache_blend"]["imp_indices"] is not None:
+                    # 计算position_ids对应的切片
+                    imp_position_ids = position_ids[:, self.cache_fuse_metadata["cache_blend"]["imp_indices"]]
+                    # 确保hidden_states的维度正确
+                    imp_hidden_states = hidden_states[:, self.cache_fuse_metadata["cache_blend"]["imp_indices"], :]
+                    
+                    # 计算position embeddings
+                    self.cache_fuse_metadata["cache_blend"]["imp_position_embeddings"] = self.rotary_emb(
+                        imp_hidden_states, 
+                        imp_position_ids
+                    )
 
             hidden_states = layer_outputs[0]
             # if i==len(self.layers)-1:
@@ -426,11 +548,7 @@ class CustomQwen2Model(Qwen2Model):
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
 
-        if self.cache_fuse_metadata["cache_blend"]["check"] and is_prefill:
-            hidden_states:torch.Tensor = hidden_states.index_select(1,
-                torch.tensor(hidden_states.shape[1] - 1).to(hidden_states.device)
-            )
-            self.cache_fuse_metadata["cache_blend"]['check'] = False
+    
         
         output = BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
@@ -442,12 +560,77 @@ class CustomQwen2Model(Qwen2Model):
 
 
    
-        
+    
 class CustomQwen2ForCausalLM(Qwen2ForCausalLM):
     
     def __init__(self,config):
         super().__init__(config)
         self.model = CustomQwen2Model(config)
+
+
+    
+    def forward(
+        self,
+        input_ids: torch.LongTensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Union[Cache, List[torch.FloatTensor]]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        logits_to_keep: Union[int, torch.Tensor] = 0,
+        **kwargs: Unpack[KwargsForCausalLM],
+    ) -> Union[Tuple, CausalLMOutputWithPast]:
+    
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
+        outputs = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+            cache_position=cache_position,
+            **kwargs,
+        )
+       
+        hidden_states = outputs[0]
+        if self.model.cache_fuse_metadata["cache_blend"]["check"]:
+            # slice_indices = hidden_states.shape[1] - 1
+            self.model.cache_fuse_metadata["cache_blend"]["check"] = False
+        
+        # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
+        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+        logits = self.lm_head(hidden_states[:, slice_indices, :])
+
+        loss = None
+        if labels is not None:
+            loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
+
+        if not return_dict:
+            output = (logits,) + outputs[1:]
+            return (loss,) + output if loss is not None else output
+
+        return CausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
 
     def _sample(
         self,
@@ -530,7 +713,8 @@ class CustomQwen2ForCausalLM(Qwen2ForCausalLM):
             )
             if synced_gpus and this_peer_finished:
                 continue
-
+          
+            
             # Clone is needed to avoid keeping a hanging ref to outputs.logits which may be very large for first iteration
             # (the clone itself is always small)
             next_token_logits = outputs.logits[:, -1, :].clone().float()
@@ -616,7 +800,7 @@ class CustomQwen2ForCausalLM(Qwen2ForCausalLM):
         
 def task_qa(model,tokenizer,doc_prompts,system_prompt,question_prompt):
     generarte_args = {
-        "max_new_tokens":1,
+        "max_new_tokens": 20,
         "do_sample": True,
         "top_p": 0.9,
         "top_k": 0,
@@ -633,6 +817,15 @@ def task_qa(model,tokenizer,doc_prompts,system_prompt,question_prompt):
     num_layer = len(model.model.layers)
     chunk_past_key_values = []
     all_prompts_ids = []
+    
+    model.model.cache_fuse_metadata["cache_blend"]["check"] = False
+    model.model.cache_fuse_metadata['cache_blend']['collect'] = False
+    
+    # inputs = tokenizer(' '.join(all_prompts), return_tensors="pt").to(model.device)
+    # outputs = model.generate(**inputs,**generarte_args)
+    # print(tokenizer.decode(outputs.sequences[0],skip_special_tokens=False))
+    
+    # return 
     global GLOBAL_KV_CACHE
 
     for i in range(len(all_prompts)):
@@ -674,10 +867,10 @@ def task_qa(model,tokenizer,doc_prompts,system_prompt,question_prompt):
 def task_translate(model,tokenizer,doc_prompts,system_prompt,question_prompt):
     generarte_args = {
         "max_new_tokens":1,
-        "do_sample": True,
+        "do_sample": False,
         "top_p": 0.9,
         "top_k": 0,
-        "temperature": 0.9,
+        "temperature": 0.1,
         "repetition_penalty": 1.0,
         "length_penalty": 1.0,
         "return_dict_in_generate":True,
@@ -722,17 +915,17 @@ def task_translate(model,tokenizer,doc_prompts,system_prompt,question_prompt):
         "attention_mask":torch.ones_like(torch.tensor(all_prompts_ids)).unsqueeze(0).to(model.model.device).to(torch.int64),
     }
     
-    model.model.cache_fuse_metadata["cache_blend"]["check"] = True
+    model.model.cache_fuse_metadata["cache_blend"]["check"] = False
     model.model.cache_fuse_metadata['cache_blend']['collect'] = False
     
     outputs = model.generate(**inputs,**generarte_args)
-    print(tokenizer.decode(outputs.sequences[0],skip_special_tokens=True))
+    print(tokenizer.decode(outputs.sequences[0],skip_special_tokens=False))
     
 
 if __name__=="__main__":
     from transformers import AutoModelForCausalLM, AutoTokenizer
-    model = CustomQwen2ForCausalLM.from_pretrained("Qwen/Qwen2.5-7B-Instruct",device_map="cuda",torch_dtype=torch.bfloat16)
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct",device_map="cuda")
+    model = CustomQwen2ForCausalLM.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct",device_map="cuda",torch_dtype=torch.bfloat16).eval()
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct",device_map="cuda")
     
     
 
