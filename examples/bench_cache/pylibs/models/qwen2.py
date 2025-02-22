@@ -27,7 +27,7 @@ from transformers.generation.logits_process import LogitsProcessorList
 from transformers.generation.stopping_criteria import StoppingCriteriaList
 from transformers.generation.streamers import BaseStreamer
 import os
-    
+from transformers import AutoTokenizer
 
 logger = logging.get_logger(__name__)
 GLOBAL_KV_CACHE: torch.Tensor = None
@@ -218,18 +218,9 @@ class CustomQwen2Attention(Qwen2Attention):
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
 
-        # 修改这里的计算代价!
-        if cache_metadata["cache_blend"]["check"] and cache_metadata["is_prefill"] and self.layer_idx > cache_metadata["cache_blend"]["check_layers"][-1]:
-            query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-            new_hidden_states = hidden_states[:,cache_metadata["cache_blend"]["imp_indices"],:]
-            new_input_shape = new_hidden_states.shape[:-1]
-            new_hidden_shape = (*new_input_shape, -1, self.head_dim)
-            key_states = self.k_proj(new_hidden_states).view(new_hidden_shape).transpose(1, 2)
-            value_states = self.v_proj(new_hidden_states).view(new_hidden_shape).transpose(1, 2)
-        else:
-            query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-            key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-            value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
                     
   
         if cache_metadata["cache_blend"]["collect"] and cache_metadata["is_prefill"]:
@@ -242,12 +233,11 @@ class CustomQwen2Attention(Qwen2Attention):
             sin = sin.unsqueeze(unsqueeze_dim)
             h_embed = (h * cos) + (rotate_half(h) * sin)
             return h_embed
-        # query_states,key_states = apply_rotary_pos_emb(query_states,key_states, cos, sin)
+       
         if  cache_metadata["cache_blend"]["check"] and cache_metadata["is_prefill"] and self.layer_idx > cache_metadata["cache_blend"]["check_layers"][-1]:
             # 重计算
-            query_states = pos_emb_apply(query_states, cos, sin, position_ids=None, unsqueeze_dim=1)
             cos, sin = cache_metadata["cache_blend"]["imp_position_embeddings"]
-            
+            query_states = pos_emb_apply(query_states, cos, sin, position_ids=None, unsqueeze_dim=1)
             key_states = pos_emb_apply(key_states, cos, sin, position_ids=None, unsqueeze_dim=1)
         else:
             # cos, sin = position_embeddings
@@ -265,14 +255,26 @@ class CustomQwen2Attention(Qwen2Attention):
                     
                     # # 计算误差
                     if self.layer_idx in cache_metadata["cache_blend"]["check_layers"]:
-                        temp_diff = torch.sum((value_states-GLOBAL_KV_CACHE[self.layer_idx][1])**2, dim=[0,1,3])
-                        topk_num = int(len(temp_diff)*cache_metadata["cache_blend"]["recomp_ratio"])
-                        top_indices = torch.topk(temp_diff, k=topk_num).indices
-                        if len(temp_diff)-1 not in top_indices:
-                            top_indices = torch.cat([top_indices,torch.tensor([len(temp_diff)-1],device=query_states.device)])
-                        top_indices,_ = torch.sort(top_indices)
-                        # query_states = query_states[:,:,top_indices,:]
-                        cache_metadata["cache_blend"]["imp_indices"] = top_indices
+                        if cache_metadata["use_additional_indices"]:
+                            old_indices = cache_metadata["old_kv_map_indices"]
+                            temp_diff = torch.sum((value_states[:,:,old_indices,:]-GLOBAL_KV_CACHE[self.layer_idx][1][:,:,old_indices,:])**2, dim=[0,1,3])
+                            topk_num = int(len(temp_diff)*cache_metadata["cache_blend"]["recomp_ratio"])
+                            top_indices = torch.topk(temp_diff, k=topk_num).indices
+                            top_indices = torch.cat([top_indices,cache_metadata["additional_map_indices"]])
+                            if key_states.shape[-2]-1 not in top_indices:
+                                top_indices = torch.cat([top_indices,torch.tensor([key_states.shape[-2]-1],device=query_states.device)])
+                            top_indices,_ = torch.sort(top_indices)
+                            query_states = query_states[:,:,top_indices,:]
+                            cache_metadata["cache_blend"]["imp_indices"] = top_indices
+                        else:
+                            temp_diff = torch.sum((value_states-GLOBAL_KV_CACHE[self.layer_idx][1])**2, dim=[0,1,3])
+                            topk_num = int(len(temp_diff)*cache_metadata["cache_blend"]["recomp_ratio"])
+                            top_indices = torch.topk(temp_diff, k=topk_num).indices
+                            if len(temp_diff)-1 not in top_indices:
+                                top_indices = torch.cat([top_indices,torch.tensor([len(temp_diff)-1],device=query_states.device)])
+                            top_indices,_ = torch.sort(top_indices)
+                            query_states = query_states[:,:,top_indices,:]
+                            cache_metadata["cache_blend"]["imp_indices"] = top_indices
                         
                         # 更新误差较大的key和value
                         GLOBAL_KV_CACHE[self.layer_idx][0][:,:,top_indices,:] = key_states[:,:,top_indices,:]
@@ -280,10 +282,11 @@ class CustomQwen2Attention(Qwen2Attention):
                     elif self.layer_idx > cache_metadata["cache_blend"]["check_layers"][-1]:
                         GLOBAL_KV_CACHE[self.layer_idx][0][:,:,cache_metadata["cache_blend"]["imp_indices"],:] = key_states
                         GLOBAL_KV_CACHE[self.layer_idx][1][:,:,cache_metadata["cache_blend"]["imp_indices"],:] = value_states
-                    # else:
-                    #     GLOBAL_KV_CACHE[self.layer_idx][0] = key_states
-                    #     GLOBAL_KV_CACHE[self.layer_idx][1] = value_states   
-                        
+                    else:
+                        GLOBAL_KV_CACHE[self.layer_idx][0] = key_states
+                        GLOBAL_KV_CACHE[self.layer_idx][1]= value_states
+                    
+
                     cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
                     key_states, value_states = past_key_value.update(GLOBAL_KV_CACHE[self.layer_idx][0], GLOBAL_KV_CACHE[self.layer_idx][1], self.layer_idx, cache_kwargs)
                     pass
@@ -376,10 +379,10 @@ class CustomQwen2DecoderLayer(Qwen2DecoderLayer):
         )
         
         
-        # if cache_metadata["cache_blend"]["check"] and cache_metadata["is_prefill"] and self.layer_idx in cache_metadata["cache_blend"]["check_layers"]:
-        #     if cache_metadata["cache_blend"]["imp_indices"] is not None:
-        #         # 确保residual的维度与hidden_states匹配
-        #         residual = residual[:, cache_metadata["cache_blend"]["imp_indices"], :]
+        if cache_metadata["cache_blend"]["check"] and cache_metadata["is_prefill"] and self.layer_idx in cache_metadata["cache_blend"]["check_layers"]:
+            if cache_metadata["cache_blend"]["imp_indices"] is not None:
+                # 确保residual的维度与hidden_states匹配
+                residual = residual[:, cache_metadata["cache_blend"]["imp_indices"], :]
         
         hidden_states = residual + hidden_states
 
@@ -405,6 +408,8 @@ class CustomQwen2Model(Qwen2Model):
         
         self.cache_fuse_metadata ={
             "is_prefill": True,
+            "use_additional_indices": False,
+            "additional_indices": None,
             "cache_blend": {
                 "check_layers":[1],
                 "check": False,
@@ -915,11 +920,116 @@ def task_translate(model,tokenizer,doc_prompts,system_prompt,question_prompt):
         "attention_mask":torch.ones_like(torch.tensor(all_prompts_ids)).unsqueeze(0).to(model.model.device).to(torch.int64),
     }
     
-    model.model.cache_fuse_metadata["cache_blend"]["check"] = False
+    model.model.cache_fuse_metadata["cache_blend"]["check"] = True
     model.model.cache_fuse_metadata['cache_blend']['collect'] = False
     
     outputs = model.generate(**inputs,**generarte_args)
     print(tokenizer.decode(outputs.sequences[0],skip_special_tokens=False))
+    
+def task_translate_2(model:CustomQwen2ForCausalLM,tokenizer:AutoTokenizer,doc_prompts,additional_doc_prompts,system_prompt,question_prompt):
+    generarte_args = {
+        "max_new_tokens":1,
+        "do_sample": False,
+        "top_p": 0.9,
+        "top_k": 0,
+        "temperature": 0.1,
+        "repetition_penalty": 1.0,
+        "length_penalty": 1.0,
+        "return_dict_in_generate":True,
+    }
+    
+    doc_prompts = ["<|im_start|>\n"+doc_prompt+"\n<|im_end|>\n" for doc_prompt in doc_prompts]
+    additional_doc_prompts = ["<|im_start|>\n"+additional_doc_prompt+"\n<|im_end|>\n" for additional_doc_prompt in additional_doc_prompts]
+    all_prompts = system_prompt + doc_prompts + question_prompt
+
+    num_layer = len(model.model.layers)
+    chunk_past_key_values = []
+    all_prompts_ids = []
+    each_chunk_indices = []
+
+    for i in range(len(all_prompts)):
+        inputs = tokenizer(all_prompts[i], return_tensors="pt").to(model.model.device)
+        all_prompts_ids.append(inputs['input_ids'][0].tolist())
+        each_chunk_indices.append(list(range(len(inputs['input_ids'][0].tolist()))))
+        model.model.cache_fuse_metadata["cache_blend"]["collect"] = True
+        model.model.cache_fuse_metadata["cache_blend"]["check"] = False 
+        print(i,len(inputs['input_ids'][0].tolist()))
+        outputs = model.generate(**inputs,**generarte_args)
+        # print(tokenizer.decode(outputs.sequences[0],skip_special_tokens=True))
+        llm_layers = model.model.layers
+        for j in range(num_layer):
+            past_key_values = llm_layers[j].self_attn.hack_kv
+            
+            temp_k = past_key_values[0].clone()
+            temp_v = past_key_values[1].clone()    
+
+            if i == 0:
+                chunk_past_key_values.append([temp_k, temp_v])
+            else:
+                chunk_past_key_values[j][0] = torch.cat((chunk_past_key_values[j][0],temp_k), dim=2)
+                chunk_past_key_values[j][1] = torch.cat((chunk_past_key_values[j][1],temp_v), dim=2)
+    
+    model.model.cache_fuse_metadata["use_additional_indices"] = True
+    model.model.cache_fuse_metadata["cache_blend"]["check"] = True
+    model.model.cache_fuse_metadata['cache_blend']['collect'] = False
+    
+    if  model.model.cache_fuse_metadata["use_additional_indices"]:
+        old_chunk_end_pos = len(system_prompt + doc_prompts)
+        for i,additional_doc_prompt in enumerate(additional_doc_prompts):
+            inputs = tokenizer(additional_doc_prompt, return_tensors="pt").to(model.model.device)
+            all_prompts_ids.insert(old_chunk_end_pos+i,inputs['input_ids'][0].tolist())
+            each_chunk_indices.insert(old_chunk_end_pos+i,list(range(len(inputs['input_ids'][0].tolist()))))
+    
+    global GLOBAL_KV_CACHE
+    GLOBAL_KV_CACHE = chunk_past_key_values
+    generarte_args["max_new_tokens"] = 1024
+    import itertools
+    input_ids = list(itertools.chain(*all_prompts_ids))
+    
+    inputs = {
+        "input_ids":torch.tensor(input_ids).unsqueeze(0).to(model.model.device).to(torch.int64),
+        "attention_mask":torch.ones_like(torch.tensor(input_ids)).unsqueeze(0).to(model.model.device).to(torch.int64),
+    }
+    
+
+    
+    if model.model.cache_fuse_metadata["cache_blend"]["check"] and model.model.cache_fuse_metadata["use_additional_indices"]:
+        # 处理indices
+        new_map_indices = []
+        old_chunks_last_index = 0
+        additional_chunks_last_index = 0
+        for i,chunk_index in enumerate(each_chunk_indices):
+            if i == old_chunk_end_pos:
+                old_chunks_last_index = new_map_indices[-1]
+            if i == old_chunk_end_pos + len(additional_doc_prompts):
+                additional_chunks_last_index = new_map_indices[-1]
+            if i == 0:
+                new_map_indices.extend(chunk_index)
+            else:
+                new_map_indices.extend([index+new_map_indices[-1]+1 for index in chunk_index])
+           
+        additional_map_indices = new_map_indices[old_chunks_last_index+1:additional_chunks_last_index+1]
+        model.model.cache_fuse_metadata["additional_map_indices"] = torch.tensor(additional_map_indices).to(model.model.device).to(torch.int64)
+        
+        old_kv_map_indices = new_map_indices[:old_chunks_last_index+1]
+        old_kv_map_indices.extend(new_map_indices[additional_chunks_last_index+1:])
+        model.model.cache_fuse_metadata["old_kv_map_indices"] = torch.tensor(old_kv_map_indices).to(model.model.device).to(torch.int64)
+        
+        for layer_idx in range(len(model.model.layers)):
+            old_k = GLOBAL_KV_CACHE[layer_idx][0]
+            old_v = GLOBAL_KV_CACHE[layer_idx][1]
+            new_k_shape =list( old_k.shape)
+            new_k_shape[2] = len(new_map_indices)
+            new_k = torch.zeros(new_k_shape).to(old_k.device).to(old_k.dtype)
+            new_v = torch.zeros_like(new_k)
+            
+            new_k[:,:,model.model.cache_fuse_metadata["old_kv_map_indices"],:] = old_k
+            new_v[:,:,model.model.cache_fuse_metadata["old_kv_map_indices"],:] = old_v
+            GLOBAL_KV_CACHE[layer_idx][0] = new_k
+            GLOBAL_KV_CACHE[layer_idx][1] = new_v
+    outputs = model.generate(**inputs,**generarte_args)
+    print(tokenizer.decode(outputs.sequences[0],skip_special_tokens=False))
+    
     
 
 if __name__=="__main__":
@@ -927,19 +1037,18 @@ if __name__=="__main__":
     model = CustomQwen2ForCausalLM.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct",device_map="cuda",torch_dtype=torch.bfloat16).eval()
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct",device_map="cuda")
     
-    
-
-
-    data = json.load(open("/root/code/vllm_plus/examples/bench_cache/data/1.json","r"))
+    data = json.load(open("/root/code/vllm_plus/examples/bench_cache/data/2.json","r"))
     chunk_num = data['chunk_num']
-    q_prompt = data['query']
+    question_prompt = data['question']
 
-    doc_prompts = [data[f'{i}'] for i in range(chunk_num)]
+    doc_prompts = [data["context"][f'{i}'] for i in range(chunk_num-2)]
+    additional_doc_prompts = [data["context"][f'{i}'] for i in range(chunk_num-2,chunk_num)]
     system_prompt = ["<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"]
-    # sys_ids = tokenizer.encode(system_prompt)
-    question_prompt = ["<|im_start|>user\n" + q_prompt + "<|im_end|>\n<|im_start|>assistant\n"]
     
-    task_qa(model,tokenizer,doc_prompts,system_prompt,question_prompt)
+    question_prompt = ["<|im_start|>user\n" + question_prompt + "<|im_end|>\n<|im_start|>assistant\n"]
+    
+    # task_translate(model,tokenizer,doc_prompts,system_prompt,question_prompt)
+    task_translate_2(model,tokenizer,doc_prompts,additional_doc_prompts,system_prompt,question_prompt)
     
 
    
@@ -953,8 +1062,3 @@ if __name__=="__main__":
     # task_translate(model,tokenizer,doc_prompts,system_prompt,question_prompt)
     
     
-    # cache_past_key_values = []
-    # for i in range(len(model.model.layers)):
-    #     cache_past_key_values.append([outputs.past_key_values.key_cache[i],outputs.past_key_values.value_cache[i]])
-
-    # torch.save(cache_past_key_values, "past_key_values.pth")
