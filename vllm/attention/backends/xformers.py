@@ -7,7 +7,7 @@ from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import (AttentionBias,
                                          BlockDiagonalCausalMask,
                                          BlockDiagonalMask,
-                                         LowerTriangularMaskWithTensorBias)
+                                         LowerTriangularMaskWithTensorBias,LowerTriangularFromBottomRightMask)
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
@@ -409,6 +409,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 f"Supported head sizes are: {suppored_head_sizes}.")
 
         self.attn_type = attn_type
+        self.update_kv = []
 
     def forward(
         self,
@@ -417,6 +418,9 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         value: Optional[torch.Tensor],
         kv_cache: torch.Tensor,
         attn_metadata: "XFormersMetadata",
+        status: int,
+        cache_fuse_metadata: dict,
+        old_kv,
         k_scale: float = 1.0,
         v_scale: float = 1.0,
         output: Optional[torch.Tensor] = None,
@@ -493,7 +497,64 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             value = value.view(-1, self.num_kv_heads, self.head_size)
         else:
             assert value is None
+        
+        if status in [1, 2]:
+            # Huan: 预缓存的key和value的形状需要调整
+            key_old = old_kv[0].view(-1, self.num_kv_heads, self.head_size)
+            value_old = old_kv[1].view(-1, self.num_kv_heads, self.head_size)
+        if status in [1]:
+            if  cache_fuse_metadata["use_additional_indices"]:
+                old_indices = cache_fuse_metadata["old_kv_map_indices"]
+                additional_indices = cache_fuse_metadata["additional_map_indices"]
+                temp_diff = torch.zeros(key.shape[0],device=query.device).to(query.dtype)
+                temp_diff[old_indices] = torch.sum((value[old_indices,:,:]-value_old[old_indices,:,:])**2, dim=[1,2])
+                temp_diff[additional_indices] = 0
+                topk_num = int(len(temp_diff)*cache_fuse_metadata["recomp_ratio"])
+                top_indices = torch.topk(temp_diff, k=topk_num).indices
+                # unique
+                top_indices = torch.cat([top_indices,additional_indices])
+                top_indices = torch.unique(top_indices)
+                
+                if key.shape[0]-1 not in top_indices:
+                    top_indices = torch.cat([top_indices,torch.tensor([key.shape[0]-1],device=query.device)])
+                top_indices,_ = torch.sort(top_indices)
+                query = query[top_indices,:,:]
+                cache_fuse_metadata["imp_indices"] = top_indices
+                attn_bias = LowerTriangularFromBottomRightMask()
+                cache_fuse_metadata["attn_bias"] = attn_bias
+                attn_metadata.prefill_metadata.attn_bias=None
+            else:
+                # old_indices = cache_fuse_metadata["old_kv_map_indices"]
+                temp_diff = torch.sum((value[:,:,:]-value_old[:,:,:])**2, dim=[1,2])
+                topk_num = int(len(temp_diff)*cache_fuse_metadata["recomp_ratio"])
+                top_indices = torch.topk(temp_diff, k=topk_num).indices
+                # if key.shape[0]-1 not in top_indices:
+                top_indices = torch.cat([top_indices,torch.tensor(list(range(key.shape[0]-8,key.shape[0]-1)),device=query.device)])
+                top_indices = torch.unique(top_indices)
+                top_indices,_ = torch.sort(top_indices)
+                query = query[top_indices,:,:]
+                cache_fuse_metadata["imp_indices"] = top_indices
+                attn_bias = LowerTriangularFromBottomRightMask()
+                cache_fuse_metadata["attn_bias"] = attn_bias
+                attn_metadata.prefill_metadata.attn_bias=None
+            pass
+            
+            
+        cache_fuse_metadata["kv_cache_dtype"] = value.dtype
+        # Jiayi: whether partial update or full update at check layer
+        if status in [1]:
+            imp_indices = cache_fuse_metadata["imp_indices"]
+            # self.update_kv.append([key[imp_indices,:,:],value[imp_indices,:,:]])
 
+        if status in [2]:
+            imp_indices = cache_fuse_metadata["imp_indices"]
+            key_old[imp_indices,:,:] = key 
+            value_old[imp_indices,:,:] = value
+            # self.update_kv.append([key,value])
+            key = key_old
+            value = value_old
+            
+        
         # Self-attention vs. cross-attention will impact
         # which KV cache memory-mapping & which
         # seqlen datastructures we utilize
@@ -533,17 +594,38 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         num_decode_query_tokens) = \
             get_num_prefill_decode_query_kv_tokens(attn_metadata, attn_type)
 
-        output = torch.empty_like(query)
-        # Query for decode. KV is not needed because it is already cached.
-        decode_query = query[num_prefill_query_tokens:]
-        # QKV for prefill.
-        query = query[:num_prefill_query_tokens]
-        if key is not None and value is not None:
-            key = key[:num_prefill_kv_tokens]
-            value = value[:num_prefill_kv_tokens]
+        if status in [1,2]:
+            num_prefill_tokens = attn_metadata.num_prefill_tokens
+            num_decode_tokens = attn_metadata.num_decode_tokens
+            output = torch.empty_like(query)
+            decode_query = None
+            query = query
+            key = key[:num_prefill_tokens]
+            value = value[:num_prefill_tokens]
+            
+            assert query.shape[0] == len(cache_fuse_metadata["imp_indices"])
+            #assert decode_query.shape[0] == num_decode_tokens
+        else:
+            num_prefill_tokens = attn_metadata.num_prefill_tokens
+            num_decode_tokens = attn_metadata.num_decode_tokens
+            assert key.shape[0] == num_prefill_tokens + num_decode_tokens
+            assert value.shape[0] == num_prefill_tokens + num_decode_tokens
 
-        assert query.shape[0] == num_prefill_query_tokens
-        assert decode_query.shape[0] == num_decode_query_tokens
+            output = torch.empty_like(query)
+            # Query for decode. KV is not needed because it is already cached.
+            decode_query = query[num_prefill_tokens:]
+            # QKV for prefill.
+            query = query[:num_prefill_tokens]
+            key = key[:num_prefill_tokens]
+            value = value[:num_prefill_tokens]
+
+            assert query.shape[0] == num_prefill_tokens
+            assert decode_query.shape[0] == num_decode_tokens
+        
+        
+
+        # assert query.shape[0] == num_prefill_query_tokens
+        # assert decode_query.shape[0] == num_decode_query_tokens
 
         if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.
@@ -552,7 +634,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 # block tables are empty if the prompt does not have a cached
                 # prefix.
                 out = self._run_memory_efficient_xformers_forward(
-                    query, key, value, prefill_meta, attn_type=attn_type)
+                    query, key, value, prefill_meta, attn_type=attn_type,status=status, 
+                    cache_fuse_metadata=cache_fuse_metadata)
                 assert out.shape == output[:num_prefill_query_tokens].shape
                 output[:num_prefill_query_tokens] = out
             else:
@@ -619,7 +702,9 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        attn_metadata: XFormersMetadata,
+        attn_metadata: XFormersMetadata, 
+        status,
+        cache_fuse_metadata,
         attn_type: str = AttentionType.DECODER,
     ) -> torch.Tensor:
         """Attention for 1D query of multiple prompts. Multiple prompt
@@ -723,13 +808,25 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             query = query.unsqueeze(0)
             key = key.unsqueeze(0)
             value = value.unsqueeze(0)
-            out = xops.memory_efficient_attention_forward(
-                query,
-                key,
-                value,
-                attn_bias=attn_bias[0],
-                p=0.0,
-                scale=self.scale)
+            if status in [1,2]:
+                #import pdb
+                #pdb.set_trace()
+                out = xops.memory_efficient_attention_forward(
+                        query,
+                        key,
+                        value,
+                        attn_bias=cache_fuse_metadata["attn_bias"],
+                        p=0.0,
+                        scale=self.scale,
+                    )
+            else:
+                out = xops.memory_efficient_attention_forward(
+                    query,
+                    key,
+                    value,
+                    attn_bias=attn_bias[0],
+                    p=0.0,
+                    scale=self.scale)
             return out.view_as(original_query)
 
         # Attention with alibi slopes.

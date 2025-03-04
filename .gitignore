@@ -4,7 +4,7 @@ examples/bench_cache/data
 examples/bench_cache/eval
 # vllm-flash-attn built from source
 vllm/vllm_flash_attn/
-
+chroma/
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

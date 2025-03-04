@@ -90,21 +90,6 @@ def sdpa_attention_forward(
     if is_causal is None:
         is_causal = causal_mask is None and query.shape[2] > 1
 
-    # if cache_metadata["cache_blend"]["check"] and cache_metadata["is_prefill"] and (layer_idx > cache_metadata["cache_blend"]["check_layers"][-1] or layer_idx in cache_metadata["cache_blend"]["check_layers"]):
-    #     attn_output = query
-    #     tmp_query = query[:,:,cache_metadata["cache_blend"]["imp_indices"],:]
-    #     tmp_a = torch.nn.functional.scaled_dot_product_attention(
-    #         tmp_query,
-    #         key,
-    #         value,
-    #         attn_mask=causal_mask,
-    #         dropout_p=dropout,
-    #         scale=scaling,
-    #         is_causal=is_causal,
-    #     )
-    #     attn_output[:,:,cache_metadata["cache_blend"]["imp_indices"],:] = tmp_a
-    #     attn_output = attn_output.transpose(1, 2).contiguous()
-    # else:
     attn_output = torch.nn.functional.scaled_dot_product_attention(
         query,
         key,
@@ -116,8 +101,6 @@ def sdpa_attention_forward(
     )
     attn_output = attn_output.transpose(1, 2).contiguous()
     
-    # attn_output = attn_output.reshape(attn_output.shape[0],-1,self.num_head*self.head_dim).contiguous()
-
     return attn_output, None
 
 def run_memory_efficient_xformers_forward(
@@ -131,10 +114,7 @@ def run_memory_efficient_xformers_forward(
         is_causal: Optional[bool] = None,
         **kwargs,
     ):
-    # if hasattr(module, "num_key_value_groups"):
-    #     key = repeat_kv(key, module.num_key_value_groups)
-    #     value = repeat_kv(value, module.num_key_value_groups)
-
+    
     n, seq_len,_, dim = query.shape
     num_group = module.num_attention_heads//module.num_key_value_heads
     num_head_per_group = module.num_key_value_heads
@@ -308,22 +288,6 @@ class CustomQwen2Attention(Qwen2Attention):
         ):
             sliding_window = self.config.sliding_window
 
-        # attn_output, attn_weights = sdpa_attention_forward(
-        #     self,
-        #     query_states,
-        #     key_states,
-        #     value_states,
-        #     attention_mask,
-        #     dropout=0.0 if not self.training else self.attention_dropout,
-        #     scaling=self.scaling,
-        #     sliding_window=sliding_window,  # main diff with Llama
-        #     cache_metadata = cache_metadata,
-        #     layer_idx = self.layer_idx,
-        #     **kwargs,
-        # )
-        # attn_output = attn_output.reshape(attn_output.shape[0],-1,self.num_head*self.head_dim).contiguous()
-     
-        
         attn_output = run_memory_efficient_xformers_forward(
             self,
             query_states.transpose(1,2),
@@ -335,8 +299,7 @@ class CustomQwen2Attention(Qwen2Attention):
             is_causal=None,
         )
     
-        # # reshape to [batch,seq_len,dim]
-        
+ 
         attn_output = self.o_proj(attn_output)
         return attn_output, None
     

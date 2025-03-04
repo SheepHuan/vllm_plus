@@ -136,7 +136,17 @@ class Attention(nn.Module):
         value: torch.Tensor,
         _kv_cache: torch.Tensor,
         _attn_metadata: AttentionMetadata,
+        status,
+        cache_fuse_metadata,
+        old_kv
     ) -> torch.Tensor:
+        self.use_direct_call = True
+        if self.use_direct_call:
+            return self.impl.forward(query, key, value, _kv_cache,
+                                    _attn_metadata, status=status, cache_fuse_metadata=cache_fuse_metadata, old_kv=old_kv, k_scale=self._k_scale,
+                                     v_scale=self._v_scale)
+        
+        
         if self.use_output:
             output = torch.empty_like(query)
             hidden_size = query.size(-1)

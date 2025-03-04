@@ -163,7 +163,6 @@ class Qwen2Attention(nn.Module):
                               quant_config=quant_config,
                               prefix=f"{prefix}.attn",
                               attn_type=attn_type)
-        self.hack_kv = []
 
     def forward(
         self,
@@ -171,32 +170,11 @@ class Qwen2Attention(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
-        status,
-        cache_fuse_metadata,
-        old_kv,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        
-        # Jiayi: modified start，设置一个占位Q，恢复缓存的K的当前位置编码
-        if status in [1,2]:
-            if cache_fuse_metadata["fake_q"] is None:
-                cache_fuse_metadata['fake_q'] = torch.rand_like(q)
-            _, old_kv[0] = self.rotary_emb(cache_fuse_metadata['org_pos'],
-                                        cache_fuse_metadata['fake_q'],
-                                        old_kv[0])
-        if cache_fuse_metadata['collect']:
-            self.hack_kv = [k.clone(), v.clone()]
-        
-        if status in [-1]:
-            # 拼接当前的key和past key
-            pass
-        
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata,
-                                status=status,
-                                cache_fuse_metadata=cache_fuse_metadata,
-                                old_kv=old_kv)
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -256,9 +234,6 @@ class Qwen2DecoderLayer(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
-        status: int,
-        cache_fuse_metadata: dict,
-        old_kv,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
@@ -272,14 +247,8 @@ class Qwen2DecoderLayer(nn.Module):
             hidden_states=hidden_states,
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
-             # Jiayi: modified start
-            status=status,
-            cache_fuse_metadata=cache_fuse_metadata,
-            old_kv=old_kv,
-            # Jiayi: modified end   
         )
-        if status == 1:
-            residual = residual[cache_fuse_metadata["imp_indices"]]
+
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
@@ -340,23 +309,6 @@ class Qwen2Model(nn.Module):
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
-            
-        self.cache_fuse_metadata = {
-            "use_additional_indices": False,
-            "additional_indices": None,
-            "old_kv_map_indices": None,
-            "check_layers":[1],
-            "check": False,
-            "collect": False,
-            "recomp_ratio":0.4,
-            "kv_cache_dtype": None,
-            "attn_bias": None,
-            "imp_indices": None,
-            "org_seq_len": None,
-            }     
-        self.old_kvs = [[None,None]] * len(self.layers)  
-            
-    
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -380,34 +332,7 @@ class Qwen2Model(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-        
-        if attn_metadata.prefill_metadata:
-            temp_status = 0 # full prefill
-            if self.cache_fuse_metadata["check"]:
-                self.cache_fuse_metadata["org_seq_len"] = input_ids.shape[0] 
-                check_layer_idx = 0
-                self.cache_fuse_metadata["fake_q"] = None  
-                self.cache_fuse_metadata["attn_bias"] = None
-                self.cache_fuse_metadata["imp_indices"] = None
-                self.cache_fuse_metadata["original_slot_mapping"] = None
-                self.cache_fuse_metadata["our_slot_mapping"] = None
-                self.cache_fuse_metadata['org_pos'] = positions[:]
-            #FIXME(Jiayi): fix this clone for faster time (Is this still needed?)
-            #self.cache_fuse_metadata["our_slot_mapping"] = input_metadata.slot_mapping.clone()
-        else:
-            temp_status = -1 # decode     
-    
-            
         for i in range(self.start_layer, self.end_layer):
-            if self.cache_fuse_metadata["check"]:
-                if i in self.cache_fuse_metadata["check_layers"]:
-                    temp_status = 1 # check this layer
-                    self.cache_fuse_metadata["check_layer"] = self.cache_fuse_metadata["check_layers"][check_layer_idx]
-                    check_layer_idx += 1
-                elif i > self.cache_fuse_metadata["check_layers"][0]:
-                    temp_status = 2 # after check
-            old_kv = self.old_kvs[i]
-            
             layer = self.layers[i]
             hidden_states, residual = layer(
                 positions,
@@ -415,24 +340,7 @@ class Qwen2Model(nn.Module):
                 kv_caches[i - self.start_layer],
                 attn_metadata,
                 residual,
-                status=temp_status,
-                cache_fuse_metadata=self.cache_fuse_metadata,
-                old_kv=old_kv
             )
-            if temp_status==1:
-                positions = positions[self.cache_fuse_metadata["imp_indices"]]
-            if temp_status in [1]:
-                update_kv = self.layers[i].self_attn.hack_kv
-                self.old_kvs[i][0][self.cache_fuse_metadata["imp_indices"],:] = update_kv[0][self.cache_fuse_metadata["imp_indices"],:]
-                self.old_kvs[i][1][self.cache_fuse_metadata["imp_indices"],:] = update_kv[1][self.cache_fuse_metadata["imp_indices"],:]
-            elif temp_status in [2]:
-                update_kv = self.layers[i].self_attn.hack_kv
-                self.old_kvs[i][0][self.cache_fuse_metadata["imp_indices"],:] = update_kv[0]
-                self.old_kvs[i][1][self.cache_fuse_metadata["imp_indices"],:] = update_kv[1]
-            elif temp_status in [0,-1]:
-                pass
-            
-            
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,
