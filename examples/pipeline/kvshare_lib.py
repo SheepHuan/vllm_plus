@@ -11,6 +11,7 @@ import hashlib
 from pymilvus import MilvusClient
 import numpy as np
 import time
+import copy
 import random
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 os.environ["VLLM_ATTENTION_BACKEND"] = "XFORMERS"
@@ -61,6 +62,119 @@ class KVSharePlugin:
         )
         
         self.logger = setup_logger("kvshare")
+        
+        
+    def edit_kvcache(self,old_prompt,new_prompt,old_kvcache):
+        old_token_ids = self.tokenizer.encode(old_prompt)
+        new_token_ids = self.tokenizer.encode(new_prompt)
+        from edit import edit_distance_with_operations
+        _,ops = edit_distance_with_operations(old_token_ids,new_token_ids,self.tokenizer)
+        new_kvcache: np.ndarray = copy.deepcopy(np.array(old_kvcache))
+        num_layer = new_kvcache.shape[0]
+        head_dim = new_kvcache.shape[-1]
+        # 先转置，将kvcache的维度从[layer,2,seq_len,head_dim]转置为[seq_len,2,layer,head]
+        new_kvcache = new_kvcache.transpose((2,1,0,3))
+        additional_indices = []
+        for op in ops:
+            if op[0]=="Delete":
+                index = int(op[-1])
+                new_kvcache = np.delete(new_kvcache, index, axis=0)
+                
+            elif op[0]=="Insert":
+                char = op[1]
+                index = int(op[-1])
+                new_kv = np.zeros([2,num_layer,head_dim])
+                new_kv[0,0] = char
+                new_kvcache = np.insert(new_kvcache, index, new_kv, axis=0)
+                additional_indices.append(index)
+            elif op[0]=="Replace":
+                char = op[2]
+                index = int(op[-1])
+                new_kv = np.zeros([2,num_layer,head_dim])
+                new_kv[0,0] = char
+                new_kvcache[index] = new_kv
+                additional_indices.append(index)
+        new_kvcache = new_kvcache.transpose((2,1,0,3))
+        key_value_cache = [[torch.from_numpy(np.array(new_kvcache[layer_idx][cid])).to('cuda:0').to(torch.bfloat16) for cid in range(2)]  for layer_idx in range(num_layer)]
+        return key_value_cache,additional_indices
+    
+    def find_kvcache(self,chunks,chunk_indices):
+        num_layer = len(self.llm.llm_engine.model_executor.driver_worker.model_runner.model.model.layers)
+        past_key_values = []
+        chunk_cache_hit_indices = []
+        chunk_cache_miss_indices = []
+        partial_token_miss_indices = []
+        partial_token_hit_indices = []
+        
+        # qwen2.5-7B
+        attention_dim = 512
+        
+        is_kvcache_hit = False
+        for i in range(len(chunks)):
+            embeddings = self.sentence_model.encode(chunks[i])  # 批量计算embedding
+            res = self.client.search(
+                collection_name=self.connection_name,  # target collection
+                data=[embeddings],  # query vectors
+                limit=1,  # number of returned entities
+                output_fields=["text", "key_value_cache","embeddings"],  # specifies fields to be returned
+            )
+            if len(res[0]) != 0:
+                if res[0][0]["distance"] >= 0.8:
+                    
+                    hash_srouce = hashlib.md5(chunks[i].encode()).hexdigest()
+                    hash_target = hashlib.md5( res[0][0]["entity"]["text"].encode()).hexdigest()
+                    if hash_srouce == hash_target:
+                        key_value_cache = res[0][0]["entity"]["key_value_cache"]
+                        key_value_cache = [[torch.from_numpy(np.array(key_value_cache[layer_idx][cid])).to('cuda:0').to(torch.bfloat16) for cid in range(2)]  for layer_idx in range(num_layer)]
+                        chunk_cache_hit_indices.append(chunk_indices[i])
+                        self.logger.info(f"kvcache hit: {chunks[i]}")
+                    else:
+                        
+                        key_value_cache,additional_indices = self.edit_kvcache(old_prompt=res[0][0]["entity"]["text"],new_prompt=chunks[i],old_kvcache=res[0][0]["entity"]["key_value_cache"])
+                        
+                        new_tokens = self.tokenizer.encode(chunks[i])
+                        token_missed = [new_tokens[index] for index in additional_indices]
+                        token_hit = [new_tokens[index] for index in range(len(new_tokens)) if index not in additional_indices]
+                        
+                        self.logger.info(f"kvcache miss: {self.tokenizer.decode(token_missed)}, kvcache hit: {self.tokenizer.decode(token_hit)}")
+                        additional_indices = [index + chunk_indices[i][0] for index in additional_indices]
+                        
+                        partial_token_miss_indices.extend(additional_indices)
+                        partial_token_hit_indices.extend(list(set(list(range(chunk_indices[i][0],chunk_indices[i][1])))-set(additional_indices)))
+            
+                        
+                        
+                        
+                    is_kvcache_hit = True
+                    
+                else:
+                    # cache miss的key value cache就是0，attention中会重新计算
+                    key_value_cache = [[torch.zeros(chunk_indices[i][1]-chunk_indices[i][0],attention_dim).to('cuda:0').to(torch.bfloat16) for _ in range(2)] for _ in range(num_layer)]
+                    chunk_cache_miss_indices.append(chunk_indices[i])
+                    self.logger.info(f"kvcache miss: {chunks[i]}, chunk_indices: {chunk_indices[i]}")
+                for j in range(num_layer):
+                    if i == 0:
+                        past_key_values.append([key_value_cache[j][0],key_value_cache[j][1]])
+                    else:
+                        past_key_values[j][0] = torch.cat((past_key_values[j][0],key_value_cache[j][0]), dim=0)
+                        past_key_values[j][1] = torch.cat((past_key_values[j][1],key_value_cache[j][1]), dim=0)
+        
+        additional_map_indices = []
+        old_kv_map_indices = []
+        for indice in chunk_cache_hit_indices:
+            old_kv_map_indices.extend(list(range(indice[0],indice[1])))
+        for indice in chunk_cache_miss_indices:
+            additional_map_indices.extend(list(range(indice[0],indice[1])))
+        
+        old_kv_map_indices.extend(partial_token_hit_indices)
+        additional_map_indices.extend(partial_token_miss_indices)
+        
+            
+        self.set_confuse_metadata_raw("use_additional_indices",True)
+        self.set_confuse_metadata_raw("additional_map_indices",torch.tensor(additional_map_indices).to('cuda:0').to(torch.int64))
+        self.set_confuse_metadata_raw("old_kv_map_indices",torch.tensor(old_kv_map_indices).to('cuda:0').to(torch.int64))
+        self.llm.llm_engine.model_executor.driver_worker.model_runner.model.model.old_kvs = past_key_values
+        return is_kvcache_hit
 
     def generate_with_kvcache(self,prompts,max_tokens=1024):
         """
@@ -99,50 +213,9 @@ class KVSharePlugin:
         num_layer = len(llm_layers)
         
         if self.use_semantic_search:
-            past_key_values = []
-            chunk_cache_hit_indices = []
-            chunk_cache_miss_indices = []
-            for i in range(len(chunks)):
-                embeddings = self.sentence_model.encode(chunks[i])  # 批量计算embedding
-                res = self.client.search(
-                    collection_name=self.connection_name,  # target collection
-                    data=[embeddings],  # query vectors
-                    limit=1,  # number of returned entities
-                    output_fields=["text", "key_value_cache","embeddings"],  # specifies fields to be returned
-                )
-                if len(res[0]) != 0:
-                    if res[0][0]["distance"] >= 0.99:
-                        key_value_cache = res[0][0]["entity"]["key_value_cache"]
-                        key_value_cache = [[torch.from_numpy(np.array(key_value_cache[layer_idx][cid])).to('cuda:0').to(torch.bfloat16) for cid in range(2)]  for layer_idx in range(num_layer)]
-                        chunk_cache_hit_indices.append(chunk_indices[i])
-                        self.is_kvcache_hit = True
-                        self.logger.info(f"kvcache hit: {chunks[i]}")
-                    else:
-                        # cache miss的key value cache就是0，attention中会重新计算
-                        key_value_cache = [[torch.zeros(chunk_indices[i][1]-chunk_indices[i][0],512).to('cuda:0').to(torch.bfloat16) for _ in range(2)] for _ in range(num_layer)]
-                        chunk_cache_miss_indices.append(chunk_indices[i])
-                        self.logger.info(f"kvcache miss: {chunks[i]}, chunk_indices: {chunk_indices[i]}")
-                    for j in range(num_layer):
-                        if i == 0:
-                            past_key_values.append([key_value_cache[j][0],key_value_cache[j][1]])
-                        else:
-                            past_key_values[j][0] = torch.cat((past_key_values[j][0],key_value_cache[j][0]), dim=0)
-                            past_key_values[j][1] = torch.cat((past_key_values[j][1],key_value_cache[j][1]), dim=0)
-            
-            additional_map_indices = []
-            old_kv_map_indices = []
-            for indice in chunk_cache_hit_indices:
-                old_kv_map_indices.extend(list(range(indice[0],indice[1])))
-            for indice in chunk_cache_miss_indices:
-                additional_map_indices.extend(list(range(indice[0],indice[1])))
-            self.set_confuse_metadata_raw("use_additional_indices",True)
-            self.set_confuse_metadata_raw("additional_map_indices",torch.tensor(additional_map_indices).to('cuda:0').to(torch.int64))
-            self.set_confuse_metadata_raw("old_kv_map_indices",torch.tensor(old_kv_map_indices).to('cuda:0').to(torch.int64))
-            self.llm.llm_engine.model_executor.driver_worker.model_runner.model.model.old_kvs = past_key_values
+            self.is_kvcache_hit = self.find_kvcache(chunks=chunks,chunk_indices=chunk_indices)
         else:
-            self.is_kvcache_hit = False
-        
-              
+            self.is_kvcache_hit = False     
         if self.is_kvcache_hit:
             self.set_confuse_metadata(check=True,collect=True)
         else:
@@ -286,12 +359,13 @@ class KVSharePlugin:
         output = self.llm.generate([input_prompt], sampling_params)
         print(f"Cached generation: {output[0].outputs[0].text}")
         print(f"TTFT with cache: {output[0].metrics.first_token_time-output[0].metrics.first_scheduled_time}")
-        
+    
+
         
 if __name__ == "__main__":
     
     text1 = "Translate the following text from English to Chinese: The real talent is resolute aspirations. The miracle appear in bad luck. Man does not become a good husband."
-    text2 = "Translate the following text from English to Chinese: The real talent is resolute aspirations. Manners make human co-existence of golden key. The miracle appear in bad luck. Man does not become a good husband. Manners make human co-existence of golden key."
+    text2 = "Translate the following texts from English to Chinese and explain them: The real talent is resolute aspirations. Manners make human co-existence of golden key. The miracle appear in bad luck. Man does not become a good husband. Manners make human co-existence of golden key."
     kvshare = KVSharePlugin(llm_model_name="Qwen/Qwen2.5-7B-Instruct",
                             sentence_model_name="Alibaba-NLP/gte-Qwen2-1.5B-instruct",
                             gpu_memory_utilization=0.8,
