@@ -21,7 +21,12 @@ if __name__ == "__main__":
     # new_wild_path = "examples/dataset/data/wild_chat_sim_only_similarity.json"
     # split_text(wild_path, new_wild_path)
     
-    sharegpt_path = "examples/dataset/data/sharegpt90k_sim.json"
-    new_sharegpt_path = "examples/dataset/data/sharegpt90k_sim_only_similarity.json"
-    split_text(sharegpt_path, new_sharegpt_path)
+    # sharegpt_path = "examples/dataset/data/sharegpt90k_sim.json"
+    # new_sharegpt_path = "examples/dataset/data/sharegpt90k_sim_only_similarity.json"
+    # split_text(sharegpt_path, new_sharegpt_path)
 
+
+
+    wild_path = "examples/dataset/data/lmsys_chat_1m_sim.json"
+    new_wild_path = "examples/dataset/data/lmsys_chat_1m_sim_only_similarity.json"
+    split_text(wild_path, new_wild_path)

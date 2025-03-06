@@ -3,117 +3,171 @@ import torch
 import json
 from transformers import AutoTokenizer
 import os
+from kvshare_lib import KVSharePlugin
+from log import setup_logger
+from tqdm import tqdm
+import hashlib
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+os.environ["VLLM_ATTENTION_BACKEND"] = "XFORMERS"
+import random
+from edit import edit_distance_with_operations
 
-def generate_with_kvshare(doc_prompts,q_prompt):
-    for sample_idx in range(1,2):
-        f = open(f"/root/code/vllm/examples/inputs/{sample_idx}.json")
-        ex = json.load(f)
-        chunk_num = ex['chunk_num']
-        doc_prompts = [ex[f'{i}'] for i in range(chunk_num)]
-        q_prompt = ex['query']
-        doc_chunk_ids = [tokenizer.encode(doc) for doc in doc_prompts]
-        system_prompt = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-        sys_ids = tokenizer.encode(system_prompt)
-        question_prompt = "<|im_start|>user\n" + q_prompt + "<|im_end|>\n<|im_start|>assistant\n"
-        question_ids = tokenizer.encode(question_prompt)
+def gen_with_kvcache(json_file_path,db_name,device="cuda:0"):
+    logger = setup_logger("kvshare_generate")
+    json_file = open(json_file_path,"r")
+    data = json.load(json_file)
 
+    kvshare = KVSharePlugin(llm_model_name="Qwen/Qwen2.5-7B-Instruct",
+                            sentence_model_name="Alibaba-NLP/gte-Qwen2-1.5B-instruct",
+                            gpu_memory_utilization=0.6,
+                            max_model_len=8192,
+                            multi_step_stream_outputs=True,
+                            disable_async_output_proc=True,
+                            chunk_separator="\n\n--\n\n--\n\n",
+                            milvus_connection_name=db_name,
+                            milvus_database_path=f"/root/code/vllm_plus/examples/pipeline/data/dataset_db/{db_name}.db",
+                            milvus_dimension=1536,
+                            device=device,
+                            )
 
-        # Create a sampling params object.
-        sampling_params = SamplingParams(temperature=0, max_tokens=1)
+    kvshare.use_semantic_search = False
+    kvshare.save_kvcache = True
+    kvshare.enable_show_log = False
+    
+    for item in tqdm(data, desc="Generating with KV cache", total=len(data)):
+        output = kvshare.generate_with_kvcache(item["text1"])
 
-        # Create an tokenizer and LLM.
-        cache_fuse_metadata = llm.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata
-        cache_fuse_metadata['collect'] = False
-        cache_fuse_metadata['check'] = False
+def count_token_saved(json_file_path,db_name,device="cuda:0"):
+    logger = setup_logger("count_token_saved")
+    json_file = open(json_file_path,"r")
+    data = json.load(json_file)
+    
+    kvshare = KVSharePlugin(llm_model_name="Qwen/Qwen2.5-7B-Instruct",
+                        sentence_model_name="Alibaba-NLP/gte-Qwen2-1.5B-instruct",
+                        gpu_memory_utilization=0.6,
+                        max_model_len=8192,
+                        multi_step_stream_outputs=True,
+                        disable_async_output_proc=True,
+                        chunk_separator="\n\n--\n\n--\n\n",
+                        milvus_connection_name=db_name,
+                        milvus_database_path=f"/root/code/vllm_plus/examples/pipeline/data/dataset_db/{db_name}.db",
+                        milvus_dimension=1536,
+                        device=device,
+                        )
+    count_token_data = []
+    for item in tqdm(data, desc="Counting tokens saved", total=len(data)):
+        text1 = item["text2"]
+        chunks = kvshare.text_split(text1)
+        num_token_hit = 0
+        num_token_miss = 0
+        chunks_indices = []
+        chunks_ids = []
+        for chunk in chunks:
+            chunk_ids = kvshare.tokenizer.encode(chunk)
+            chunks_ids.append(chunk_ids)
+            if len(chunks_indices) !=0:
+                chunks_indices.append([chunks_indices[-1][1],chunks_indices[-1][1]+len(chunk_ids)])
+            else:
+                chunks_indices.append([0,len(chunk_ids)])
+        similar_text = []
+        for i in range(len(chunks)):
+            embeddings =  kvshare.sentence_model.encode(chunks[i])  # 批量计算embedding
+            res = kvshare.client.search(
+                collection_name=db_name,  # target collection
+                data=[embeddings],  # query vectors
+                limit=1,  # number of returned entities
+                output_fields=["text", "key_value_cache","embeddings","hash_key"],  # specifies fields to be returned
+            )
 
-        s_start = [151644]
-        s_end = [151645]
-        # s_end_len = len(s_end)
-        old_kvs = []
-
-        doc_chunk_ids = [sys_ids]+doc_chunk_ids
-        doc_chunk_ids = [s_start + chunk_ids + s_end for chunk_ids in doc_chunk_ids]
-        
-        doc_chunk_ids = doc_chunk_ids + [question_ids]
-
-        # last_len = len([q_ids])
-
-        cache_fuse_metadata['collect'] = True
-        cache_fuse_metadata["check"] = False
-
-        num_layer = len(llm.llm_engine.model_executor.driver_worker.model_runner.model.model.layers)
-        chunk_past_key_values = []
-        
-        # Concatenate old KVs
-        for i in range(len(doc_chunk_ids)):
-            prompts = [tokenizer.decode(doc_chunk_ids[i])]
-            llm.generate(prompts, sampling_params)
-            
-            llm_layers = llm.llm_engine.model_executor.driver_worker.model_runner.model.model.layers
-            for j in range(num_layer):
-                past_key_values = llm_layers[j].self_attn.hack_kv
-                temp_k = past_key_values[0].clone()
-                temp_v = past_key_values[1].clone()
-                # if i in [0,len(doc_chunk_ids)-1]:
-                #     temp_k = past_key_values[0].clone() # do not chage with s_start_1
-                #     temp_v = past_key_values[1].clone()
-                # else:
-                #     temp_k = past_key_values[0][len(s_start):len(doc_chunk_ids[i])-len(s_end)].clone()
-                #     temp_v = past_key_values[1][len(s_start):len(doc_chunk_ids[i])-len(s_end)].clone()    
-
-                if i == 0:
-                    chunk_past_key_values.append([temp_k, temp_v])
+            if len(res[0]) != 0:
+                if res[0][0]["distance"] >= 0.8:      
+                    hash_srouce = hashlib.md5(chunks[i].encode()).hexdigest()
+                    hash_target = hashlib.md5( res[0][0]["entity"]["text"].encode()).hexdigest()
+                    if hash_srouce == hash_target:
+                        num_token_hit += len(chunks_ids[i])
+                        similar_text.append(res[0][0]["entity"]["text"])
+                    else:
+                        old_token_ids = kvshare.tokenizer.encode(res[0][0]["entity"]["text"])
+                        new_token_ids = chunks_ids[i]
+                        _,ops = edit_distance_with_operations(old_token_ids,new_token_ids,kvshare.tokenizer)
+                        additional_indices = [op[-1] for op in ops if op[0] == "Insert" or op[0] == "Replace"]
+                        num_token_hit += len(new_token_ids) - len(additional_indices)
+                        num_token_miss += len(additional_indices)
+                        similar_text.append(res[0][0]["entity"]["text"])
                 else:
-                    #pdb.set_trace()
-                    chunk_past_key_values[j][0] = torch.cat((chunk_past_key_values[j][0],temp_k), dim=0)
-                    chunk_past_key_values[j][1] = torch.cat((chunk_past_key_values[j][1],temp_v), dim=0)
-            #print(temp_k.shape[0])
-            llm.llm_engine.model_executor.driver_worker.model_runner.model.model.old_kvs = chunk_past_key_values
-            
-        input_ids = []
+                    num_token_miss += len(kvshare.tokenizer.encode(chunks[i]))
+                    similar_text.append("")
+            else:
+                num_token_miss += len(kvshare.tokenizer.encode(chunks[i]))
+        num_all_token = 0
+        for i in range(len(chunks_indices)):
+            num_all_token += chunks_indices[i][1] - chunks_indices[i][0]
+        rate = num_token_hit/num_all_token
+        count_token_data.append(
+            {"num_token_hit":num_token_hit,
+            "num_token_miss":num_token_miss,
+            "num_token_total":num_all_token,
+            "rate":rate,
+            "real_text":item["text2"],
+            "similar_text": '\n'.join(similar_text)
+            })
+        # logger.info(f"num_token_hit: {num_token_hit}, num_token_miss: {num_token_miss}")
+    # 统计rate > 0.5,>0.7,>0.9的item的个数，同时计算这些在整个数据集上的占比
+    num_rate_01 = len([item for item in count_token_data if item["rate"] > 0.1])
+    num_rate_03 = len([item for item in count_token_data if item["rate"] > 0.3])
+    num_rate_05 = len([item for item in count_token_data if item["rate"] > 0.5])
+    num_rate_07 = len([item for item in count_token_data if item["rate"] > 0.7])
+    num_rate_09 = len([item for item in count_token_data if item["rate"] > 0.9])
+    
+    logger.info(f"num_rate_01: {num_rate_01}, num_rate_03: {num_rate_03}, num_rate_05: {num_rate_05}, num_rate_07: {num_rate_07}, num_rate_09: {num_rate_09}")
+    logger.info(f"num_rate_01: {num_rate_01/len(count_token_data)}, num_rate_03: {num_rate_03/len(count_token_data)}, num_rate_05: {num_rate_05/len(count_token_data)}, num_rate_07: {num_rate_07/len(count_token_data)}, num_rate_09: {num_rate_09/len(count_token_data)}")
+    
+    all_saved_token = 0
+    all_num_token_dataset = 0
+    for item in count_token_data:
+        all_saved_token += item["num_token_hit"]
+        all_num_token_dataset += item["num_token_total"]    
+    logger.info(f"all_saved_token: {all_saved_token}, all_num_token_dataset: {all_num_token_dataset}")
+    logger.info(f"rate: {all_saved_token/all_num_token_dataset}")
+    
+    with open(f"examples/pipeline/data/count_token_data/{db_name}.json","w") as f:
+        json.dump(count_token_data,f,indent=4)
 
-        for i in range(len(doc_chunk_ids)):
-            temp_ids = doc_chunk_ids[i]
-            # if i in [0,len(doc_chunk_ids)-1]:
-            #     temp_ids = doc_chunk_ids[i]
-            # else:
-            #     temp_ids = doc_chunk_ids[i][len(s_start):len(doc_chunk_ids[i])-len(s_end)]
-            input_ids += temp_ids
-            
-        input_prompt = tokenizer.decode(input_ids)
-        # print(input_prompt)
-        new_input_ids = tokenizer.encode(input_prompt)
-        if len(input_ids) < len(new_input_ids):
-            b = [input_ids[i]==new_input_ids[i] for i in range(len(input_ids))]
-            index = b.index(False)
-            print("--------------------------------")
-            print(tokenizer.decode(input_ids[index-5:index+5]))
-            print(tokenizer.decode(new_input_ids[index-5:index+5]))
-            print("--------------------------------")
-            
-        # exit(0)
-        sampling_params = SamplingParams(temperature=0, max_tokens=10)
-        cache_fuse_metadata["check"] = True
-        cache_fuse_metadata['collect'] = False
-        cache_fuse_metadata['suffix_len'] = 0
-        output = llm.generate([input_prompt], sampling_params)
-        print(f"Cached generation: {output[0].outputs[0].text}")
-        print(f"TTFT with cache: {output[0].metrics.first_token_time-output[0].metrics.first_scheduled_time}")
-        
-    sampling_params = SamplingParams(temperature=0, max_tokens=10)
-    cache_fuse_metadata["check"] = False
-    cache_fuse_metadata['collect'] = False
-    output = llm.generate([input_prompt], sampling_params)
-    print(f"Normal generation: {output[0].outputs[0].text}")
-    print(f"TTFT with full prefill: {output[0].metrics.first_token_time-output[0].metrics.first_scheduled_time}")
-    print("------------")
-
+def parse_json_file(json_file_path):
+    json_file = open(json_file_path,"r")
+    data = json.load(json_file)
+    all_saved_token = 0
+    all_num_token_dataset = 0
+    for item in data:
+        all_saved_token += item["num_token_hit"]
+        all_num_token_dataset += item["num_token_total"]    
+    print(f"all_saved_token: {all_saved_token}, all_num_token_dataset: {all_num_token_dataset}")
+    print(f"rate: {all_saved_token/all_num_token_dataset}")
 
 if __name__ == "__main__":
-    os.environ["VLLM_ATTENTION_BACKEND"] = "XFORMERS"
-
-
-    model_name = "Qwen/Qwen2.5-1.5B-Instruct"
-    llm = LLM(model=model_name, gpu_memory_utilization=0.8,max_model_len=8192,
-          multi_step_stream_outputs=True,
-          disable_async_output_proc=True)
+    pass
+    
+    # os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    # json_file = "examples/dataset/data/sharegpt90k_sim_only_similarity.json"
+    # gen_with_kvcache(json_file,"sharegpt90k_qwen2_5_7b",device="cuda:0")
+    
+    # os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    # json_file = "examples/dataset/data/lmsys_chat_1m_sim_only_similarity.json"
+    # gen_with_kvcache(json_file,"lmsys_chat_1m_qwen2_5_7b",device="cuda:0")
+    
+    # os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+    # json_file = "examples/dataset/data/wild_chat_sim_only_similarity.json"
+    # gen_with_kvcache(json_file,"wild_chat_qwen2_5_7b",device="cuda:0")
+    
+    # os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    # json_file = "examples/dataset/data/sharegpt90k_sim_only_similarity.json"
+    # count_token_saved(json_file,"sharegpt90k_qwen2_5_7b",device="cuda:0")
+    
+    # os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    # json_file = "examples/pipeline/data/count_token_data/sharegpt90k_qwen2_5_7b.json"
+    # parse_json_file(json_file)
+    
+    
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    json_file = "examples/dataset/data/lmsys_chat_1m_sim_only_similarity.json"
+    count_token_saved(json_file,"lmsys_chat_1m_qwen2_5_7b",device="cuda:0")
