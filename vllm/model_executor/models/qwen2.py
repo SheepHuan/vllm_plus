@@ -421,16 +421,18 @@ class Qwen2Model(nn.Module):
             )
             if temp_status==1:
                 positions = positions[self.cache_fuse_metadata["imp_indices"]]
-            if temp_status in [1]:
-                update_kv = self.layers[i].self_attn.hack_kv
-                self.old_kvs[i][0][self.cache_fuse_metadata["imp_indices"],:] = update_kv[0][self.cache_fuse_metadata["imp_indices"],:]
-                self.old_kvs[i][1][self.cache_fuse_metadata["imp_indices"],:] = update_kv[1][self.cache_fuse_metadata["imp_indices"],:]
-            elif temp_status in [2]:
-                update_kv = self.layers[i].self_attn.hack_kv
-                self.old_kvs[i][0][self.cache_fuse_metadata["imp_indices"],:] = update_kv[0]
-                self.old_kvs[i][1][self.cache_fuse_metadata["imp_indices"],:] = update_kv[1]
-            elif temp_status in [0,-1]:
-                pass
+            if self.cache_fuse_metadata["use_additional_indices"]:
+                
+                if temp_status in [1]:
+                    update_kv = self.layers[i].self_attn.hack_kv
+                    self.old_kvs[i][0][self.cache_fuse_metadata["imp_indices"],:] = update_kv[0][self.cache_fuse_metadata["imp_indices"],:]
+                    self.old_kvs[i][1][self.cache_fuse_metadata["imp_indices"],:] = update_kv[1][self.cache_fuse_metadata["imp_indices"],:]
+                elif temp_status in [2]:
+                    update_kv = self.layers[i].self_attn.hack_kv
+                    self.old_kvs[i][0][self.cache_fuse_metadata["imp_indices"],:] = update_kv[0]
+                    self.old_kvs[i][1][self.cache_fuse_metadata["imp_indices"],:] = update_kv[1]
+                elif temp_status in [0,-1]:
+                    pass
             
             
         if not get_pp_group().is_last_rank:

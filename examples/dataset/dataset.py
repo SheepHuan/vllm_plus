@@ -289,7 +289,7 @@ def clean_by_token_length(path, new_path):
     json.dump(new_json_data, open(new_path, "w"), indent=4)
     
 def clean_by_ppl(path,new_path,device="cuda:0"):
-    from data.ppl import PerplexityMetric
+    from ppl import PerplexityMetric
     ppl_metric = PerplexityMetric(model_id="Qwen/Qwen2.5-0.5B-Instruct", device=device)
     json_data = json.load(open(path, "r"))
     new_json_data = []

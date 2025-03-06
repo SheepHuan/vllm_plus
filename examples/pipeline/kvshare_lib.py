@@ -188,7 +188,7 @@ class KVSharePlugin:
         return is_kvcache_hit,metirc
 
 
-    def generate_with_kvcache(self,prompts,max_tokens=1024):
+    def generate_with_kvshare(self,prompts,max_tokens=1024):
         """
         prompts分块，然后检查是否存在kvcache，如果存在，则使用kvcache，否则使用full prefill，存储下kv cache
         
@@ -328,29 +328,16 @@ class KVSharePlugin:
         system_prompt = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
         user_prompt_prefix = "<|im_start|>user\n"
         user_prompt_suffix = "<|im_end|>\n<|im_start|>assistant\n"
-        question_prompt =  user_prompt_prefix  + user_prompt + user_prompt_suffix
+        doc_prompts =  [system_prompt,user_prompt_prefix,user_prompt]  + doc_prompts + [user_prompt_suffix]
         
         doc_chunk_ids = [self.tokenizer.encode(doc) for doc in doc_prompts]
-        # Create a sampling params object.
+ 
         sampling_params = SamplingParams(temperature=0, max_tokens=1)
 
         # Create an tokenizer and LLM.
         cache_fuse_metadata = self.llm.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata
         cache_fuse_metadata['collect'] = False
         cache_fuse_metadata['check'] = False
-        
-        s_start = [151644]
-        s_end = [151645]
-        
-        system_ids = self.tokenizer.encode(system_prompt)
-        question_ids = self.tokenizer.encode(question_prompt)
-        
-        doc_chunk_ids = [system_ids]+doc_chunk_ids
-        doc_chunk_ids = [s_start + chunk_ids + s_end for chunk_ids in doc_chunk_ids]
-
-        doc_chunk_ids = doc_chunk_ids + [question_ids]
-
-
 
         cache_fuse_metadata['collect'] = True
         cache_fuse_metadata["check"] = False
@@ -380,13 +367,16 @@ class KVSharePlugin:
             temp_ids = doc_chunk_ids[i]
             input_ids += temp_ids
         input_prompt = self.tokenizer.decode(input_ids)
-        sampling_params = SamplingParams(temperature=0, max_tokens=512)
+        sampling_params = SamplingParams(temperature=0, max_tokens=2048)
         cache_fuse_metadata["check"] = True
         cache_fuse_metadata['collect'] = False
         output = self.llm.generate([input_prompt], sampling_params)
         print(f"Cached generation: {output[0].outputs[0].text}")
         print(f"TTFT with cache: {output[0].metrics.first_token_time-output[0].metrics.first_scheduled_time}")
-    
+        metric = {
+            "ttft":output[0].metrics.first_token_time-output[0].metrics.first_scheduled_time
+        }
+        return output[0].outputs[0].text,metric
 
         
 if __name__ == "__main__":
@@ -409,4 +399,5 @@ if __name__ == "__main__":
     kvshare.use_semantic_search = True
     kvshare.save_kvcache = False
     
-    kvshare.generate_with_kvcache(text2)
+    # kvshare.generate_with_kvcache(text2)
+    # kvshare.generate_with_cacheblend(text2,text1)

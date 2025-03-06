@@ -524,11 +524,9 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 cache_fuse_metadata["attn_bias"] = attn_bias
                 attn_metadata.prefill_metadata.attn_bias=None
             else:
-                # old_indices = cache_fuse_metadata["old_kv_map_indices"]
                 temp_diff = torch.sum((value[:,:,:]-value_old[:,:,:])**2, dim=[1,2])
                 topk_num = int(len(temp_diff)*cache_fuse_metadata["recomp_ratio"])
                 top_indices = torch.topk(temp_diff, k=topk_num).indices
-                # if key.shape[0]-1 not in top_indices:
                 top_indices = torch.cat([top_indices,torch.tensor(list(range(key.shape[0]-8,key.shape[0]-1)),device=query.device)])
                 top_indices = torch.unique(top_indices)
                 top_indices,_ = torch.sort(top_indices)
