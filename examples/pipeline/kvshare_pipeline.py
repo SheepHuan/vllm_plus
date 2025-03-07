@@ -58,6 +58,7 @@ def count_token_saved(json_file_path,db_name,device="cuda:0"):
     for item in tqdm(data, desc="Counting tokens saved", total=len(data)):
         text1 = item["text2"]
         chunks = kvshare.text_split(text1)
+        chunks = [chunk for chunk in chunks if chunk!="\n\n" and chunk!="\n"]
         num_token_hit = 0
         num_token_miss = 0
         chunks_indices = []
@@ -168,6 +169,10 @@ if __name__ == "__main__":
     # parse_json_file(json_file)
     
     
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-    json_file = "examples/dataset/data/lmsys_chat_1m_sim_only_similarity.json"
-    count_token_saved(json_file,"lmsys_chat_1m_qwen2_5_7b",device="cuda:0")
+    # os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    # json_file = "examples/dataset/data/lmsys_chat_1m_sim_only_similarity.json"
+    # count_token_saved(json_file,"lmsys_chat_1m_qwen2_5_7b",device="cuda:0")
+    
+    os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+    json_file = "examples/dataset/data/wild_chat_sim_only_similarity.json"
+    count_token_saved(json_file,"wild_chat_qwen2_5_7b",device="cuda:0")

@@ -542,8 +542,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         # Jiayi: whether partial update or full update at check layer
         if status in [1]:
             imp_indices = cache_fuse_metadata["imp_indices"]
-            # self.update_kv.append([key[imp_indices,:,:],value[imp_indices,:,:]])
-
+            
         if status in [2]:
             imp_indices = cache_fuse_metadata["imp_indices"]
             key_old[imp_indices,:,:] = key 

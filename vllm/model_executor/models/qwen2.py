@@ -185,12 +185,8 @@ class Qwen2Attention(nn.Module):
             _, old_kv[0] = self.rotary_emb(cache_fuse_metadata['org_pos'],
                                         cache_fuse_metadata['fake_q'],
                                         old_kv[0])
-        if cache_fuse_metadata['collect']:
+        if cache_fuse_metadata['collect'] and attn_metadata.prefill_metadata:
             self.hack_kv = [k.clone(), v.clone()]
-        
-        if status in [-1]:
-            # 拼接当前的key和past key
-            pass
         
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata,

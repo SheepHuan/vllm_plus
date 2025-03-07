@@ -13,6 +13,9 @@ import numpy as np
 import time
 import copy
 import random
+import spacy
+import time
+
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 os.environ["VLLM_ATTENTION_BACKEND"] = "XFORMERS"
 
@@ -21,6 +24,10 @@ def timestamp_long():
     a = a + str(random.randint(0,9))
     a = int(a)
     return a
+
+
+
+
 
 class KVSharePlugin:
     def __init__(self, 
@@ -35,6 +42,7 @@ class KVSharePlugin:
                  milvus_connection_name="kvshare",
                  milvus_database_path="examples/pipeline/data/milvus_demo.db",
                  milvus_dimension=1536,
+                 spacy_pipeline ="en_core_web_sm"
                  ):
         self.llm = LLM(model=llm_model_name, gpu_memory_utilization=gpu_memory_utilization,max_model_len=max_model_len,
           multi_step_stream_outputs=multi_step_stream_outputs,enforce_eager=True,
@@ -61,8 +69,12 @@ class KVSharePlugin:
         self.metrics = {}
         
         self.chunk_separator = chunk_separator
+        
+        en_pipline = "en_core_web_sm"
+        # zh_pipline = "zh_core_web_sm"
         self.text_splitter = SpacyTextSplitter(
             separator=self.chunk_separator,
+            pipeline = spacy_pipeline
         )
         
         self.logger = setup_logger("kvshare")
@@ -102,7 +114,7 @@ class KVSharePlugin:
         return key_value_cache,additional_indices
     
     def find_kvcache(self,chunks,chunk_indices):
-        
+        start_time = time.time() * 1000
         metirc = {
             "num_token_hit":0,
             "num_token_miss":0,
@@ -129,7 +141,6 @@ class KVSharePlugin:
             )
             if len(res[0]) != 0:
                 if res[0][0]["distance"] >= 0.8:
-                    
                     hash_srouce = hashlib.md5(chunks[i].encode()).hexdigest()
                     hash_target = hashlib.md5( res[0][0]["entity"]["text"].encode()).hexdigest()
                     if hash_srouce == hash_target:
@@ -140,9 +151,7 @@ class KVSharePlugin:
                             self.logger.info(f"kvcache hit: {chunks[i]}")
                         metirc["num_token_hit"] += len(self.tokenizer.encode(chunks[i]))
                     else:
-                        
                         key_value_cache,additional_indices = self.edit_kvcache(old_prompt=res[0][0]["entity"]["text"],new_prompt=chunks[i],old_kvcache=res[0][0]["entity"]["key_value_cache"])
-                        
                         new_tokens = self.tokenizer.encode(chunks[i])
                         token_missed = [new_tokens[index] for index in additional_indices]
                         token_hit = [new_tokens[index] for index in range(len(new_tokens)) if index not in additional_indices]
@@ -180,11 +189,17 @@ class KVSharePlugin:
         old_kv_map_indices.extend(partial_token_hit_indices)
         additional_map_indices.extend(partial_token_miss_indices)
         
-            
-        self._set_confuse_metadata_raw("use_additional_indices",True)
-        self._set_confuse_metadata_raw("additional_map_indices",torch.tensor(additional_map_indices).to(self.device).to(torch.int64))
+        if len(additional_map_indices) != 0:
+            self._set_confuse_metadata_raw("use_additional_indices",True)
+            self._set_confuse_metadata_raw("additional_map_indices",torch.tensor(additional_map_indices).to(self.device).to(torch.int64))
+        else:
+            self._set_confuse_metadata_raw("use_additional_indices",False)
         self._set_confuse_metadata_raw("old_kv_map_indices",torch.tensor(old_kv_map_indices).to(self.device).to(torch.int64))
         self.llm.llm_engine.model_executor.driver_worker.model_runner.model.model.old_kvs = past_key_values
+        
+        end_time = time.time() * 1000
+        metirc["find_kvcache_time"] = end_time - start_time
+        self.logger.info(f"find_kvcache_time: {metirc['find_kvcache_time']}")
         return is_kvcache_hit,metirc
 
 
@@ -196,7 +211,7 @@ class KVSharePlugin:
         system_prompt = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
         user_prompt_prefix = "<|im_start|>user\n"
         user_prompt_suffix = "<|im_end|>\n<|im_start|>assistant\n"
-        metric = None
+        metric = {}
         
         if self.is_need_chunk:
             # 检索kvcache
@@ -219,12 +234,14 @@ class KVSharePlugin:
         query_prompt = self.tokenizer.decode(chunks_ids)
         query_ids_len = len(self.tokenizer.encode(query_prompt))
         
+        # 检查query_ids_len是否等于chunk_ids_len
+        assert query_ids_len == len(chunks_ids)
         if self.enable_show_log:
             self.logger.info(f"query_ids_len: {query_ids_len}, chunk_ids_len: {len(chunk_ids)}")
         
 
         if self.use_semantic_search:
-            self.is_kvcache_hit,metirc = self.find_kvcache(chunks=chunks,chunk_indices=chunk_indices)
+            self.is_kvcache_hit,metric = self.find_kvcache(chunks=chunks,chunk_indices=chunk_indices)
         else:
             self.is_kvcache_hit = False
               
@@ -243,6 +260,7 @@ class KVSharePlugin:
         if self.enable_show_log:
             self.logger.info(f"Cached generation: {output[0].outputs[0].text}")
             self.logger.info(f"TTFT with cache: {output[0].metrics.first_token_time-output[0].metrics.first_scheduled_time}")
+        metric["ttft"] = output[0].metrics.first_token_time-output[0].metrics.first_scheduled_time
         
         if self.save_kvcache:
             self.save_current_kvcache(chunks,chunk_indices)
@@ -322,7 +340,19 @@ class KVSharePlugin:
     def text_split(self,text):
         docs = self.text_splitter.split_text(text)
         chunks = docs[0].split(self.chunk_separator)
-        return chunks
+        # 如果chunk内部只有\n这样字符，则不保存
+        def contains_only_newline_and_space(s):
+            valid_chars = {'\n', ' '}
+            return set(s).issubset(valid_chars)
+
+        new_chunks = []
+        for chunk in chunks:
+            if contains_only_newline_and_space(chunk):
+                continue
+            new_chunks.append(chunk)
+            
+        
+        return new_chunks
 
     def generate_with_cacheblend(self,doc_prompts,user_prompt,max_tokens=1024):
         system_prompt = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
@@ -383,7 +413,7 @@ if __name__ == "__main__":
     import os
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
     os.environ["VLLM_ATTENTION_BACKEND"] = "XFORMERS"
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    os.environ["CUDA_VISIBLE_DEVICES"] = "1"
     
     
     text1 = "Translate the following text from English to Chinese: The real talent is resolute aspirations. The miracle appear in bad luck. Man does not become a good husband."
@@ -399,5 +429,5 @@ if __name__ == "__main__":
     kvshare.use_semantic_search = True
     kvshare.save_kvcache = False
     
-    # kvshare.generate_with_kvcache(text2)
+    kvshare.generate_with_kvshare(text2)
     # kvshare.generate_with_cacheblend(text2,text1)
