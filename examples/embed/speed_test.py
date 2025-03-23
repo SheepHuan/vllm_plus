@@ -87,7 +87,23 @@ def profile_dataset(embedder: CustomEmbedder,model_name: str, json_path: str, sa
     json.dump(new_data, open(save_path, "w"), indent=4)
     return speed
 
+
+def delta(embedder: CustomEmbedder):
+    text1 = "I like to eat apple!"
+    text2 = "I love to eat banana!"
+    text3 = "I don't like to eat banana!"
+    
+    out1 = embedder.query_embed([text1], [text2])
+    out2 = embedder.query_embed([text1], [text3])
+    out3 = embedder.query_embed([text2], [text3])
+    print(out1)
+    print(out2)
+    print(out3)
+    
+    
 if __name__ == "__main__":
-    index = 3
+    index = 1
     embedder = CustomEmbedder(model_name[index])
-    profile_dataset(embedder,model_name[index], "examples/dataset/data/sharegpt90k_ppl.json", f"examples/dataset/data/sharegpt90k_{model_name[index].split('/')[-1]}_speed.json")
+    delta(embedder)
+    
+    # profile_dataset(embedder,model_name[index], "examples/dataset/data/sharegpt90k_ppl.json", f"examples/dataset/data/sharegpt90k_{model_name[index].split('/')[-1]}_speed.json")

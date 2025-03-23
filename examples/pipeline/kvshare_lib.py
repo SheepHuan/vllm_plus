@@ -42,11 +42,12 @@ class KVSharePlugin:
                  milvus_connection_name="kvshare",
                  milvus_database_path="examples/pipeline/data/milvus_demo.db",
                  milvus_dimension=1536,
-                 spacy_pipeline ="en_core_web_sm"
+                 spacy_pipeline ="en_core_web_sm",
+                 enable_prefix_caching=False
                  ):
         self.llm = LLM(model=llm_model_name, gpu_memory_utilization=gpu_memory_utilization,max_model_len=max_model_len,
-          multi_step_stream_outputs=multi_step_stream_outputs,enforce_eager=True,
-          disable_async_output_proc=disable_async_output_proc)
+          multi_step_stream_outputs=multi_step_stream_outputs,enforce_eager=True,enable_prefix_caching=enable_prefix_caching,
+          disable_async_output_proc=disable_async_output_proc,dtype="bfloat16")
         
         self.device = device
         self.tokenizer = AutoTokenizer.from_pretrained(llm_model_name)
@@ -78,6 +79,10 @@ class KVSharePlugin:
         )
         
         self.logger = setup_logger("kvshare")
+        self.system_prompt = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+        self.user_prompt_prefix = "<|im_start|>user\n"
+        self.user_prompt_suffix = "<|im_end|>\n<|im_start|>assistant\n"
+        
       
     def edit_kvcache(self,old_prompt,new_prompt,old_kvcache):
         old_token_ids = self.tokenizer.encode(old_prompt)
@@ -113,6 +118,9 @@ class KVSharePlugin:
         key_value_cache = [[torch.from_numpy(np.array(new_kvcache[layer_idx][cid])).to(self.device).to(torch.bfloat16) for cid in range(2)]  for layer_idx in range(num_layer)]
         return key_value_cache,additional_indices
     
+        
+        
+    
     def find_kvcache(self,chunks,chunk_indices):
         start_time = time.time() * 1000
         metirc = {
@@ -129,6 +137,7 @@ class KVSharePlugin:
         
         # qwen2.5-7B
         attention_dim = 512
+        # 整个文本查询
         
         is_kvcache_hit = False
         for i in range(len(chunks)):
@@ -172,6 +181,7 @@ class KVSharePlugin:
                         self.logger.info(f"kvcache miss: {chunks[i]}, chunk_indices: {chunk_indices[i]}")
                     metirc["num_token_miss"] += len(self.tokenizer.encode(chunks[i]))
                     
+                    
                 for j in range(num_layer):
                     if i == 0:
                         past_key_values.append([key_value_cache[j][0],key_value_cache[j][1]])
@@ -208,23 +218,23 @@ class KVSharePlugin:
         prompts分块，然后检查是否存在kvcache，如果存在，则使用kvcache，否则使用full prefill，存储下kv cache
         
         """
-        system_prompt = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-        user_prompt_prefix = "<|im_start|>user\n"
-        user_prompt_suffix = "<|im_end|>\n<|im_start|>assistant\n"
+        # 根据modelname
+
         metric = {}
         
         if self.is_need_chunk:
             # 检索kvcache
             chunks = self.text_split(prompts)
             chunks = [chunk +'\n' for chunk in chunks]
-            chunks = [system_prompt,user_prompt_prefix] + chunks + [user_prompt_suffix]
+            chunks = [self.system_prompt,self.user_prompt_prefix] + chunks + [self.user_prompt_suffix]
         else:
-            chunks = [system_prompt,user_prompt_prefix] + [prompts+'\n'] + [user_prompt_suffix]
+            chunks = [self.system_prompt,self.user_prompt_prefix] + [prompts+'\n'] + [self.user_prompt_suffix]
         
         chunks_ids = []
         chunk_indices = []
-        for chunk in chunks:
-            chunk_ids = self.tokenizer.encode(chunk)
+        for i,chunk in enumerate(chunks):
+            
+            chunk_ids = self.tokenizer.encode(chunk,add_special_tokens=False)
             chunks_ids.extend(chunk_ids)
             if len(chunk_indices) !=0:
                 chunk_indices.append([chunk_indices[-1][1],chunk_indices[-1][1]+len(chunk_ids)])
@@ -232,10 +242,12 @@ class KVSharePlugin:
                 chunk_indices.append([0,len(chunk_ids)])
             
         query_prompt = self.tokenizer.decode(chunks_ids)
-        query_ids_len = len(self.tokenizer.encode(query_prompt))
+        query_ids_len = len(self.tokenizer.encode(query_prompt,add_special_tokens=False))
         
         # 检查query_ids_len是否等于chunk_ids_len
+        print(f"query_ids_len: {query_ids_len}, chunk_ids_len: {len(chunk_ids)}, equal: {query_ids_len == len(chunk_ids)}")
         assert query_ids_len == len(chunks_ids)
+        
         if self.enable_show_log:
             self.logger.info(f"query_ids_len: {query_ids_len}, chunk_ids_len: {len(chunk_ids)}")
         
@@ -246,7 +258,7 @@ class KVSharePlugin:
             self.is_kvcache_hit = False
               
         if self.is_kvcache_hit:
-            self._set_confuse_metadata_raw("recomp_ratio",0.0)
+            self._set_confuse_metadata_raw("recomp_ratio",0.15)
             self._set_confuse_metadata(check=True,collect=True)
         else:
             self._set_confuse_metadata(check=False,collect=True)
@@ -325,15 +337,27 @@ class KVSharePlugin:
     
     def generate(self,prompts,max_tokens=1024):
         self._set_confuse_metadata(check=False,collect=False)
+        metric = {}
+        sampling_params = SamplingParams(temperature=0.1, max_tokens=max_tokens)
         
-        sampling_params = SamplingParams(temperature=0, max_tokens=max_tokens)
+        # system_prompt = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+        # user_prompt_prefix = "<|im_start|>user\n"
+        # user_prompt_suffix = "<|im_end|>\n<|im_start|>assistant\n"
+        # system_prompt = "<|begin_of_text|><|start_header_id|>system<|end_header_id|>You are a helpful assistant.<|eot_id|>\n"
+        # user_prompt_prefix = "<|start_header_id|>user<|end_header_id|>\n"
+        # user_prompt_suffix = "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n"
             
+        
+        
+        prompts = self.system_prompt + self.user_prompt_prefix + prompts + self.user_prompt_suffix
+        
         output = self.llm.generate(prompts, sampling_params)
         if self.enable_show_log:
             self.logger.info(f"Cached generation: {output[0].outputs[0].text}")
             self.logger.info(f"TTFT with cache: {output[0].metrics.first_token_time-output[0].metrics.first_scheduled_time}")
-
-        return output[0].outputs[0].text
+        metric["ttft"] = output[0].metrics.first_token_time-output[0].metrics.first_scheduled_time
+        metric["output"] = output[0].outputs[0].text
+        return output[0].outputs[0].text,metric
         
     
     
@@ -355,10 +379,10 @@ class KVSharePlugin:
         return new_chunks
 
     def generate_with_cacheblend(self,doc_prompts,user_prompt,max_tokens=1024):
-        system_prompt = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-        user_prompt_prefix = "<|im_start|>user\n"
-        user_prompt_suffix = "<|im_end|>\n<|im_start|>assistant\n"
-        doc_prompts =  [system_prompt,user_prompt_prefix,user_prompt]  + doc_prompts + [user_prompt_suffix]
+        # system_prompt = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+        # user_prompt_prefix = "<|im_start|>user\n"
+        # user_prompt_suffix = "<|im_end|>\n<|im_start|>assistant\n"
+        doc_prompts =  [self.system_prompt,self.user_prompt_prefix,user_prompt]  + doc_prompts + [self.user_prompt_suffix]
         
         doc_chunk_ids = [self.tokenizer.encode(doc) for doc in doc_prompts]
  
@@ -400,6 +424,7 @@ class KVSharePlugin:
         sampling_params = SamplingParams(temperature=0, max_tokens=2048)
         cache_fuse_metadata["check"] = True
         cache_fuse_metadata['collect'] = False
+        cache_fuse_metadata['recomp_ratio'] = 0.15
         output = self.llm.generate([input_prompt], sampling_params)
         print(f"Cached generation: {output[0].outputs[0].text}")
         print(f"TTFT with cache: {output[0].metrics.first_token_time-output[0].metrics.first_scheduled_time}")
@@ -408,7 +433,27 @@ class KVSharePlugin:
         }
         return output[0].outputs[0].text,metric
 
+class QwenKVSharePlugin(KVSharePlugin):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # self.tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
+        self.system_prompt = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+        self.user_prompt_prefix = "<|im_start|>user\n"
+        self.user_prompt_suffix = "<|im_end|>\n<|im_start|>assistant\n"
         
+
+class LLamaKVSharePlugin(QwenKVSharePlugin):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.system_prompt = "<|begin_of_text|><|start_header_id|>system<|end_header_id|>You are a helpful assistant.<|eot_id|>"
+        self.user_prompt_prefix = "<|start_header_id|>user<|end_header_id|>"
+        self.user_prompt_suffix = "<|eot_id|><|start_header_id|>assistant<|end_header_id|>"
+        
+        
+        
+        
+        
+    
 if __name__ == "__main__":
     import os
     os.environ["TRANSFORMERS_OFFLINE"] = "1"

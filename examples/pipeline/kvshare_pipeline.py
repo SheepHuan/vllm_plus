@@ -145,6 +145,7 @@ def parse_json_file(json_file_path):
     print(f"all_saved_token: {all_saved_token}, all_num_token_dataset: {all_num_token_dataset}")
     print(f"rate: {all_saved_token/all_num_token_dataset}")
 
+
 if __name__ == "__main__":
     pass
     
@@ -173,6 +174,6 @@ if __name__ == "__main__":
     # json_file = "examples/dataset/data/lmsys_chat_1m_sim_only_similarity.json"
     # count_token_saved(json_file,"lmsys_chat_1m_qwen2_5_7b",device="cuda:0")
     
-    os.environ["CUDA_VISIBLE_DEVICES"] = "1"
-    json_file = "examples/dataset/data/wild_chat_sim_only_similarity.json"
-    count_token_saved(json_file,"wild_chat_qwen2_5_7b",device="cuda:0")
+    # os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+    # json_file = "examples/dataset/data/wild_chat_sim_only_similarity.json"
+    # count_token_saved(json_file,"wild_chat_qwen2_5_7b",device="cuda:0")
