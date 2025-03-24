@@ -25,13 +25,15 @@ os.environ["VLLM_ATTENTION_BACKEND"] = "XFORMERS"
 import json
 from typing import List
 import time
-def get_key_value(model:LLM,prompt: List[str],save_dir:str):
-    # template = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
-    # prompt = template.format(prompt=prompt)
+def get_key_value(model:LLM,prompt: List[str]):
+    model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["check"] = False
+    model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata['collect'] = True
+    template = "<|im_start|>user\n{prompt}\n<|im_end|>"
+    prompt = template.format(prompt=prompt)
     
     sampling_params = SamplingParams(temperature=0, max_tokens=1)
-    output = model.generate(prompt, sampling_params)
-    print(output[0].outputs[0].text)
+    output = model.generate(prompt, sampling_params,use_tqdm=False)
+    
     llm_layers = model.llm_engine.model_executor.driver_worker.model_runner.model.model.layers
     
     past_key_values = []
@@ -40,100 +42,77 @@ def get_key_value(model:LLM,prompt: List[str],save_dir:str):
         hack_kv = llm_layers[j].self_attn.hack_kv
         temp_key_cache = hack_kv[0].clone()
         temp_value_cache = hack_kv[1].clone()
-        # print(temp_key_cache.shape)
-        past_key_values.append([temp_key_cache,temp_value_cache])
-    os.makedirs(save_dir,exist_ok=True)
-    kv_save_path = os.path.join(save_dir,"kv.pth")
-    token_save_path = os.path.join(save_dir,"token.json")
-    prompt_token_ids = output[0].prompt_token_ids
-    torch.save(past_key_values,kv_save_path)
-    json.dump(prompt_token_ids,open(token_save_path,"w"))
-
+        past_key_values.append(torch.stack([temp_key_cache,temp_value_cache],dim=0))
+    past_key_values = torch.stack(past_key_values,dim=0)
     return past_key_values
 
+def compare_kv_error(source_kv: List[torch.Tensor], target_kv: List[torch.Tensor]):
+    pass
 
-def analyze_token_reuse_rate(json_path:str,error_edit_path:str):
-    from edit2 import find_text_differences,apply_text_changes
+
+def clean_text(json_path:str,clean_path:str):
+    import hashlib
     data = json.load(open(json_path))
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
-    clusters_data = data["clusters"]
-    
-    plot_data_x = []  # total text length (source + target)
-    plot_data_y = []  # processing time (ms)
-    error_count = 0
-    error_items = []
-    for key,cluster in tqdm(clusters_data.items()):
-        size = cluster["size"]
+    new_data = []
+    global_id = 0  # 全局ID计数器
+    # 给每个cluster的每一个meber添加一个独特的整数id
+    for key,cluster in tqdm(data["clusters"].items()):
+        # hash每一个text
         members = cluster["members"]
-        texts = [member["text"] for member in members]
+        hash_set = set()
+        # 给第一个member添加global_id
+        global_id += 1
+        members[0]["global_id"] = global_id
         
-        source_text = texts[0]
-        for target_text in texts[1:]:
-            target_tokens = tokenizer.encode(target_text)
-            source_tokens = tokenizer.encode(source_text)
-            start_time = time.time()
-            diff_report = find_text_differences(tokenizer, source_tokens, target_tokens)
-            modified_tokens = apply_text_changes(source_tokens, target_tokens, diff_report, tokenizer)
-            end_time = time.time()
-            processing_time = end_time - start_time
-            # check if the modified tokens are the same as the target tokens
-            if modified_tokens != target_tokens:
-                error_count += 1
-                error_items.append({
-                    "source_text":source_text,
-                    "target_text":target_text,
-                    "modified_text": tokenizer.decode(modified_tokens),
-                    # "target_tokens":target_tokens
+        new_members = [members[0]]
+        for item in members[1:]:
+            hash_value = hashlib.md5(item["text"].encode()).hexdigest()
+            if hash_value not in hash_set:
+                global_id += 1
+                hash_set.add(hash_value)
+                item["global_id"] = global_id
+                new_members.append(item)
+        new_data.append(new_members)
+    json.dump(new_data,open(clean_path,"w"),indent=4)
+
+def test(json_path:str):
+    from edit2 import apply_change,find_text_differences
+    from vdb_cls import VectorDB
+    model_name = "Qwen/Qwen2.5-7B-Instruct"
+    model = LLM(model=model_name,dtype="float16")
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    data = json.load(open(json_path))
+    db = VectorDB(collection_name="instruction_wildv2",dimension=768,database_path="examples/pipeline/data/milvus_kvacc.db")
+    for cluster in tqdm(data):
+        source_item = cluster[0]
+        for target_item in cluster[1:]:
+            source_cached_res = db.search_by_id(source_item["global_id"])
+            if len(source_cached_res) > 0:
+                pass
+            else:
+                source_kv = get_key_value(model,source_item["text"])
+                db.insert({
+                    "id": source_item["global_id"],
+                    "vector": np.random.randn(768).astype(np.float32),
+                    "key_value_cache": source_kv.detach().cpu().numpy().astype(np.float32)
                 })
-            
-            
-            plot_data_x.append(len(source_tokens)+len(target_tokens))
-            plot_data_y.append(processing_time*1000)  # 转换为毫秒
-    
-    # 创建图表
-    plt.figure(figsize=(10, 6))
-    
-    # 绘制散点图
-    plt.scatter(plot_data_x, plot_data_y, 
-               alpha=0.5,        # 设置透明度
-               s=20,            # 点的大小
-               c=plot_data_y,   # 使用处理时间作为颜色
-               cmap='viridis')  # 使用viridis颜色映射
-    
-    # 设置y轴为对数刻度
-    plt.yscale('log')
-    
-    # 添加颜色条
-    plt.colorbar(label='Processing Time (ms)')
-    
-    # 设置轴标签
-    plt.xlabel('Total Text Length (tokens)')
-    plt.ylabel('Processing Time (ms) - Log Scale')
-    
-    # 设置标题
-    plt.title('Text Length vs Processing Time (Log Scale)')
-    
-    # 添加网格（对数刻度下的网格）
-    plt.grid(True, linestyle='--', alpha=0.7, which='both')  # 'both' 表示主要和次要网格线都显示
-    
-    # 保存图片
-    plt.savefig('examples/pipeline/images/edit_time_log.png', dpi=300, bbox_inches='tight')
-    plt.close()
-    
-    print(f"Error count: {error_count}")
-    print(f"Error rate: {error_count/len(plot_data_x):.4f}")
-    print(f"Average processing time: {np.mean(plot_data_y):.2f} ms")
-    print(f"Max processing time: {max(plot_data_y):.2f} ms")
-    print(f"Min processing time: {min(plot_data_y):.2f} ms")
-    
-    json.dump(error_items,open(error_edit_path,"w"),indent=4,ensure_ascii=False)
+            target_cached_res = db.search_by_id(target_item["global_id"])
+            if len(target_cached_res) > 0:
+                pass
+            else:
+                target_kv = get_key_value(model,target_item["text"])
+                db.insert({
+                    "id": target_item["global_id"],
+                    "vector": np.random.randn(768).astype(np.float32),
+                    "key_value_cache": target_kv.detach().cpu().numpy().astype(np.float32)
+                })
 
 if __name__ == "__main__":
+    # test("examples/dataset/data/similar/instruction_wildv2/instruction_wildv2_batch_embeddings_clusters.json")
+    raw_path = "examples/dataset/data/similar/instruction_wildv2/instruction_wildv2_batch_embeddings_clusters.json"
+    clean_path = "examples/dataset/data/similar/instruction_wildv2/instruction_wildv2_batch_embeddings_clusters_clean.json"
+    # clean_text(raw_path,clean_path)
     
+    test(clean_path)
     
-    analyze_token_reuse_rate("examples/dataset/data/similar/instruction_wildv2/instruction_wildv2_batch_embeddings_clusters.json",
-                             "examples/dataset/data/similar/instruction_wildv2/error_edit.json")
-    
-    # plot_kv_acc("examples/pipeline/data/kv")
-    pass
     

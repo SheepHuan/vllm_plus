@@ -4,133 +4,138 @@ import time
 import matplotlib.pyplot as plt
 import numpy as np
 import json
+# from intervaltree import IntervalTree
+from functools import lru_cache
 
 def find_text_differences(tokenizer, source_tokens, target_tokens, window_size=2):
     """
-    比较两段文本的差异，使用Rabin-Karp算法进行高效匹配，输出source变到target需要进行的操作
+    使用Rabin-Karp算法比较两段文本的差异，找出可复用的文本片段
     Args:
-        tokenizer: 分词器
+        tokenizer: 分词器，用于文本解码
         source_tokens: 源文本的token序列
         target_tokens: 目标文本的token序列
-        window_size: 滑动窗口大小
+        window_size: 滑动窗口大小，用于控制匹配的最小长度
+    Returns:
+        dict: 包含匹配片段、移动操作和统计信息的差异报告
     """
-    # 添加参数验证
+    # 输入参数验证
     if not source_tokens or not target_tokens:
         raise ValueError("源文本和目标文本不能为空")
     
-    if window_size < 1:
-        raise ValueError("窗口大小必须大于0")
-    
-    if window_size > min(len(source_tokens), len(target_tokens)):
-        window_size = min(len(source_tokens), len(target_tokens))
-        print(f"警告：窗口大小已调整为 {window_size}")
-    
-    # 输入验证
-    if len(source_tokens) < window_size or len(target_tokens) < window_size:
-        return {
-            "common_segments": [],
-            "source_unique": list(range(len(source_tokens))),
-            "target_unique": list(range(len(target_tokens))),
-            "difference_summary": "文本太短，无法进行有效比较"
-        }
-    
-    def rolling_hash(tokens, start, window_size, prev_hash=None):
-        if prev_hash is None:
-            hash_val = 0
+    def compute_rolling_hash(tokens, start_pos, window_size, previous_hash=None):
+        """
+        计算或更新滚动哈希值
+        Args:
+            tokens: token序列
+            start_pos: 窗口起始位置
+            window_size: 窗口大小
+            previous_hash: 前一个位置的哈希值
+        """
+        if previous_hash is None:
+            # 计算初始哈希值
+            current_hash = 0
             for i in range(window_size):
-                hash_val = (hash_val * base + tokens[start + i]) % modulus
-            return hash_val
+                current_hash = (current_hash * HASH_BASE + tokens[start_pos + i]) % HASH_MODULUS
+            return current_hash
         
-        old_val = tokens[start - 1]
-        new_val = tokens[start + window_size - 1]
-        hash_val = ((prev_hash - old_val * base_power) * base + new_val) % modulus
-        return hash_val
+        # 更新滚动哈希值
+        removed_token = tokens[start_pos - 1]
+        new_token = tokens[start_pos + window_size - 1]
+        current_hash = ((previous_hash - removed_token * base_power) * HASH_BASE + new_token) % HASH_MODULUS
+        return current_hash
 
-    # 哈希参数
-    base = 256
-    modulus = 1_000_000_007
-    base_power = pow(base, window_size - 1, modulus)
-    source_len, target_len = len(source_tokens), len(target_tokens)
+    # 哈希算法参数
+    HASH_BASE = 256
+    HASH_MODULUS = 1_000_000_007
+    base_power = pow(HASH_BASE, window_size - 1, HASH_MODULUS)
     
-    # 跟踪匹配状态
-    source_matched = [False] * source_len
-    target_matched = [False] * target_len
-    common_segments = []
+    # 初始化匹配状态跟踪
+    source_length = len(source_tokens)
+    target_length = len(target_tokens)
+    matched_positions_source = [False] * source_length
+    matched_positions_target = [False] * target_length
+    matching_segments = []
     
-    # 构建源文本的哈希索引
-    source_hash_index = {}
+    # 构建源文本的哈希索引表
+    source_hash_table = {}
     current_hash = None
-    for i in range(source_len - window_size + 1):
-        current_hash = rolling_hash(source_tokens, i, window_size, current_hash)
-        if current_hash in source_hash_index:
-            source_hash_index[current_hash].append(i)
-        else:
-            source_hash_index[current_hash] = [i]
+    for source_pos in range(source_length - window_size + 1):
+        current_hash = compute_rolling_hash(source_tokens, source_pos, window_size, current_hash)
+        source_hash_table.setdefault(current_hash, []).append(source_pos)
     
     # 在目标文本中查找匹配
     current_hash = None
-    for j in range(target_len - window_size + 1):
-        current_hash = rolling_hash(target_tokens, j, window_size, current_hash)
-        if current_hash in source_hash_index:
-            for i in source_hash_index[current_hash]:
-                if source_tokens[i:i+window_size] == target_tokens[j:j+window_size]:
-                    common_segments.append({
-                        "source_span": (i, i+window_size-1),
-                        "target_span": (j, j+window_size-1),
-                        "text": source_tokens[i:i+window_size]
+    for target_pos in range(target_length - window_size + 1):
+        current_hash = compute_rolling_hash(target_tokens, target_pos, window_size, current_hash)
+        if current_hash in source_hash_table:
+            # 处理哈希碰撞，验证实际内容
+            for source_pos in source_hash_table[current_hash]:
+                if source_tokens[source_pos:source_pos+window_size] == target_tokens[target_pos:target_pos+window_size]:
+                    matching_segments.append({
+                        "source_span": (source_pos, source_pos+window_size-1),
+                        "target_span": (target_pos, target_pos+window_size-1),
+                        "text": source_tokens[source_pos:source_pos+window_size]
                     })
-                    source_matched[i:i+window_size] = [True] * window_size
-                    target_matched[j:j+window_size] = [True] * window_size
-    
-    
-    # 重新组织差异报告的输出
-    def merge_segments(segments):
-        """合并在source和target中都有重叠的子串段"""
+                    # 标记已匹配的位置
+                    matched_positions_source[source_pos:source_pos+window_size] = [True] * window_size
+                    matched_positions_target[target_pos:target_pos+window_size] = [True] * window_size
+
+    def merge_overlapping_segments(segments):
+        """
+        合并重叠的文本片段
+        Args:
+            segments: 待合并的文本片段列表
+        Returns:
+            list: 合并后的文本片段列表
+        """
         if not segments:
             return []
         
-        # 按source位置排序
-        sorted_segs = sorted(segments, key=lambda x: (x["source_span"][0], x["target_span"][0], x["source_span"][1]))
-        merged = [sorted_segs[0]]
+        # 按源文本位置和目标文本位置排序
+        sorted_segments = sorted(segments, 
+                               key=lambda x: (x["source_span"][0], x["target_span"][0], x["source_span"][1]))
+        merged_segments = [sorted_segments[0]]
  
-        for next_seg in sorted_segs[1:]:
-            last_seg = merged[-1]
-            # 同时检查source和target中是否都有重叠
-            source_has_overlap = last_seg["source_span"][1] >= next_seg["source_span"][0]
-            target_has_overlap = last_seg["target_span"][1] >= next_seg["target_span"][0]
+        for current_segment in sorted_segments[1:]:
+            previous_segment = merged_segments[-1]
+            # 检查源文本和目标文本中的重叠
+            source_overlaps = previous_segment["source_span"][1] >= current_segment["source_span"][0]
+            target_overlaps = previous_segment["target_span"][1] >= current_segment["target_span"][0]
             
-            if source_has_overlap and target_has_overlap:
-                # 检查合并后的文本是否在source和target中都匹配
-                source_start = last_seg["source_span"][0]
-                source_end = max(last_seg["source_span"][1], next_seg["source_span"][1])
-                target_start = last_seg["target_span"][0]
-                target_end = max(last_seg["target_span"][1], next_seg["target_span"][1])
+            if source_overlaps and target_overlaps:
+                # 计算合并后的范围
+                merged_source_start = previous_segment["source_span"][0]
+                merged_source_end = max(previous_segment["source_span"][1], 
+                                     current_segment["source_span"][1])
+                merged_target_start = previous_segment["target_span"][0]
+                merged_target_end = max(previous_segment["target_span"][1], 
+                                     current_segment["target_span"][1])
                 
-                # 验证合并后的文本在source和target中是否一致
-                source_text = source_tokens[source_start:source_end + 1]
-                target_text = target_tokens[target_start:target_end + 1]
+                # 验证合并的有效性
+                merged_source_text = source_tokens[merged_source_start:merged_source_end + 1]
+                merged_target_text = target_tokens[merged_target_start:merged_target_end + 1]
                 
-                if source_text == target_text:
-                    merged[-1] = {
-                        "source_span": (source_start, source_end),
-                        "target_span": (target_start, target_end),
-                        "text": source_text
+                if merged_source_text == merged_target_text:
+                    merged_segments[-1] = {
+                        "source_span": (merged_source_start, merged_source_end),
+                        "target_span": (merged_target_start, merged_target_end),
+                        "text": merged_source_text
                     }
                 else:
-                    merged.append(next_seg)
+                    merged_segments.append(current_segment)
             else:
-                merged.append(next_seg)
+                merged_segments.append(current_segment)
         
-        return merged
+        return merged_segments
 
-    def analyze_text_changes(tokenizer, source_tokens, target_tokens,common_segments):
+    def analyze_text_changes(tokenizer, source_tokens, target_tokens, common_segments):
         """分析文本变化，找出相同子串需要的移动操作"""
         # FIXME: 合并片段会出现出问题
-        merged_segments = merge_segments(common_segments)
+        merged_segments = merge_overlapping_segments(common_segments)
         # merged_segments = common_segments
         moves = []
         
-        # 计算target中复用的token数量
+        # 使用集合来优化查找操作
         reused_tokens = set()
         for segment in merged_segments:
             target_start, target_end = segment["target_span"]
@@ -152,25 +157,6 @@ def find_text_differences(tokenizer, source_tokens, target_tokens, window_size=2
                 "to_position": (target_start, target_end)
             })
         
-        # 过滤掉目标位置是其他移动子集的移动
-        # filtered_moves = []
-        # for i, move1 in enumerate(moves):
-        #     is_subset = False
-        #     t1_start, t1_end = move1["to_position"]
-            
-        #     for j, move2 in enumerate(moves):
-        #         if i == j:
-        #             continue
-        #         t2_start, t2_end = move2["to_position"]
-                
-        #         # 检查move1的目标位置是否是move2的子集
-        #         if (t1_start >= t2_start and t1_end <= t2_end and 
-        #             (t1_end - t1_start) < (t2_end - t2_start)):  # 确保是真子集
-        #             is_subset = True
-        #             break
-            
-        #     if not is_subset:
-        #         filtered_moves.append(move1)
         
         # 更新报告格式
         report = {
@@ -191,7 +177,7 @@ def find_text_differences(tokenizer, source_tokens, target_tokens, window_size=2
     # common_segments 去重,可能有多个相同片段会移动到相同位置
     unique_segments = []
     unique_target_span = set()
-    for segment in common_segments:
+    for segment in matching_segments:
         if segment["target_span"] in unique_target_span:
             continue
         unique_target_span.add(segment["target_span"])
@@ -299,6 +285,14 @@ def apply_text_changes(source_tokens: list, target_tokens: list, diff_report: di
         print(f"复用比例: {len(token_sources['reused'])/len(result)*100:.2f}%")
     
     return result
+
+
+def apply_change(source_tokens: list, target_tokens: list, source_kvcache):
+    target_kvcache = []
+    pass
+    
+
+
 
 def test_performance(data_path:str):
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
