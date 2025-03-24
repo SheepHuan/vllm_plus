@@ -94,16 +94,14 @@ def plot_edit_efficiency(json_path:str,edit_time_path:str):
     data = json.load(open(json_path))
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
     clusters_data = data["clusters"]
-    
-    plot_data_x = []  # total text length (source + target)
-    plot_data_y = []  # processing time (ms)
+    error_count = 0
 
     edit_items = []
     for key,cluster in tqdm(clusters_data.items()):
         size = cluster["size"]
         members = cluster["members"]
         texts = [member["text"] for member in members]
-        
+        avg_edit_time = []
         source_text = texts[0]
         for target_text in texts[1:]:
             target_tokens = tokenizer.encode(target_text)
@@ -114,16 +112,18 @@ def plot_edit_efficiency(json_path:str,edit_time_path:str):
             end_time = time.time()
             processing_time = end_time - start_time
             # check if the modified tokens are the same as the target tokens
-         
+            if modified_tokens != target_tokens:
+                error_count += 1
             edit_items.append({
                 "source_text":source_text,
                 "target_text":target_text,
                 "edit_time":processing_time * 1000
             })
-            # plot_data_x.append(len(source_tokens)+len(target_tokens))
-            # plot_data_y.append(processing_time*1000)  # 转换为毫秒
+            avg_edit_time.append(processing_time * 1000)
+    
     json.dump(edit_items,open(edit_time_path,"w"),indent=4,ensure_ascii=False)
-
+    print(f"error count: {error_count}")
+    print(f"avg edit time: {np.mean(avg_edit_time)} ms")
 def plot_comparison_curves(embedding_time_path: str, edit_time_path: str , prefill_time_path:str):
     """
     对比编辑时间和嵌入时间的性能曲线
@@ -222,6 +222,12 @@ if __name__ == "__main__":
         "examples/dataset/data/similar/instruction_wildv2/edit_time.json",
         "examples/dataset/data/similar/instruction_wildv2/prefill_time.json"
     )
+    
+    
+    # plot_edit_efficiency(
+    #     "examples/dataset/data/similar/instruction_wildv2/instruction_wildv2_batch_embeddings_clusters.json",
+    #     "examples/dataset/data/similar/instruction_wildv2/edit_time.json"
+    # )
     
     
     

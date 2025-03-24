@@ -329,7 +329,7 @@ def count_cluster_size(cluster_path):
     
 
 if __name__ == "__main__":
-    
+    pass
     # data_path = "examples/dataset/data/lmsys_chat_1m_ppl.json"
     # data = json.load(open(data_path))
     # save_path = "examples/dataset/data/lmsys_chat_1m_batch_embeddings.npz"
@@ -441,9 +441,14 @@ if __name__ == "__main__":
     # save_path = "examples/dataset/data/similar/moss/moss_batch_embeddings.npz"
     # generate_embeddings(data,save_path,128)
     
-    data_path = "examples/dataset/data/similar/moss/moss_batch_embeddings.npz"
-    convert_npz_to_npy(
-        data_path,
-        "examples/dataset/data/similar/moss/moss_batch_embeddings.npy",
-        n_processes=64  # 可以根据CPU核心数调整
-    )
+    # data_path = "examples/dataset/data/similar/moss/moss_batch_embeddings.npz"
+    # convert_npz_to_npy(
+    #     data_path,
+    #     "examples/dataset/data/similar/moss/moss_batch_embeddings.npy",
+    #     n_processes=64  # 可以根据CPU核心数调整
+    # )
+    
+    # data_path = "examples/dataset/data/similar/moss/moss_batch_embeddings.npy"
+    # json_keys_path = "examples/dataset/data/similar/moss/moss_batch_embeddings.npy.keys.json"
+    # original_json_path = "examples/dataset/data/similar/moss/moss_ppl.json"  # 原始数据文件
+    # faiss_cluster(data_path, json_keys_path, original_json_path)

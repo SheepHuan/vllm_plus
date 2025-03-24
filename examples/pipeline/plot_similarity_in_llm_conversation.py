@@ -20,7 +20,7 @@ def draw():
         "ShareGPT-90k",
         "LMSYS-1M",
         "WildChat-1M",
-        "ChatbotArena",
+        "MOSS",
         "BELLE-0.8M",
         "InstructionWild v2"
     ]
@@ -28,7 +28,7 @@ def draw():
         364544,
         765472,
         1146111,
-        39316,
+        2753298,
         2244995,
         110904
     ]
@@ -37,7 +37,7 @@ def draw():
         160447,
         41644,
         462105,
-        11687,
+        6234056,
         1384085,
         21458
     ]
@@ -56,7 +56,7 @@ def draw():
                    hatch='/')  # 添加斜线填充
     
     bars2 = plt.bar(x + width/2, duplicate_instructions, width,
-                   label='Duplicate Instructions',
+                   label='High-Similar Instructions',
                    color='#2ca02c',
                    hatch='\\')  # 添加反斜线填充
     

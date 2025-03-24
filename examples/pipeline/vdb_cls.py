@@ -8,7 +8,13 @@ class VectorDB:
                  dimension:int,
                  database_path:str,
                  ):
-        self.client = MilvusClient(database_path)
+        options = [
+            ('grpc.max_receive_message_length', 1500 * 1024 * 1024),  # 500MB
+            ('grpc.max_send_message_length', 1500 * 1024 * 1024)     # 500MB
+        ]
+
+        
+        self.client = MilvusClient(database_path,   channel_options=options)
         self.collection_name = collection_name
         self.create_collection(collection_name,dimension)
         self.client.load_collection(collection_name)
