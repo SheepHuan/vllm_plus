@@ -436,7 +436,14 @@ if __name__ == "__main__":
     
     
     
-    data_path = "examples/dataset/data/similar/moss/moss_ppl.json"
-    data = json.load(open(data_path))
-    save_path = "examples/dataset/data/similar/moss/moss_batch_embeddings.npz"
-    generate_embeddings(data,save_path,128)
+    # data_path = "examples/dataset/data/similar/moss/moss_ppl.json"
+    # data = json.load(open(data_path))
+    # save_path = "examples/dataset/data/similar/moss/moss_batch_embeddings.npz"
+    # generate_embeddings(data,save_path,128)
+    
+    data_path = "examples/dataset/data/similar/moss/moss_batch_embeddings.npz"
+    convert_npz_to_npy(
+        data_path,
+        "examples/dataset/data/similar/moss/moss_batch_embeddings.npy",
+        n_processes=64  # 可以根据CPU核心数调整
+    )

@@ -2,10 +2,29 @@ import os
 from vllm import LLM, SamplingParams
 from transformers import AutoTokenizer
 import torch
+import matplotlib
+import matplotlib.pyplot as plt
+import numpy as np
+from matplotlib import font_manager 
+from tqdm import tqdm
+
+font_path = "/root/code/vllm_plus/examples/dataset/data/fonts"
+ 
+font_files = font_manager.findSystemFonts(fontpaths=font_path)
+ 
+for file in font_files:
+    font_manager.fontManager.addfont(file)
+
+# 设置字体
+matplotlib.rcParams['font.family'] = 'Arial'  # 设置字体为黑体
+matplotlib.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
+
+
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 os.environ["VLLM_ATTENTION_BACKEND"] = "XFORMERS"
 import json
 from typing import List
+import time
 def get_key_value(model:LLM,prompt: List[str],save_dir:str):
     # template = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
     # prompt = template.format(prompt=prompt)
@@ -33,127 +52,88 @@ def get_key_value(model:LLM,prompt: List[str],save_dir:str):
     return past_key_values
 
 
-def gen_kv():
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-    model_name = "Qwen/Qwen2.5-7B-Instruct"
-    llm = LLM(model=model_name, gpu_memory_utilization=0.6,         max_model_len=8192,
-          multi_step_stream_outputs=True,enforce_eager=True,enable_prefix_caching=False,
-          disable_async_output_proc=True,dtype="bfloat16")
-    llm.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["check"] = False
-    llm.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata['collect'] = True
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    test1 = "apple,banana,orange"
-    # tokens1 = tokenizer.encode(test1)
-    get_key_value(llm,test1,"examples/pipeline/data/kv/test1")
+def analyze_token_reuse_rate(json_path:str,error_edit_path:str):
+    from edit2 import find_text_differences,apply_text_changes
+    data = json.load(open(json_path))
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
+    clusters_data = data["clusters"]
     
-    test2 = "apple"
-    # tokens2 = tokenizer.encode(test2)
-    get_key_value(llm,test2,"examples/pipeline/data/kv/test2")
+    plot_data_x = []  # total text length (source + target)
+    plot_data_y = []  # processing time (ms)
+    error_count = 0
+    error_items = []
+    for key,cluster in tqdm(clusters_data.items()):
+        size = cluster["size"]
+        members = cluster["members"]
+        texts = [member["text"] for member in members]
+        
+        source_text = texts[0]
+        for target_text in texts[1:]:
+            target_tokens = tokenizer.encode(target_text)
+            source_tokens = tokenizer.encode(source_text)
+            start_time = time.time()
+            diff_report = find_text_differences(tokenizer, source_tokens, target_tokens)
+            modified_tokens = apply_text_changes(source_tokens, target_tokens, diff_report, tokenizer)
+            end_time = time.time()
+            processing_time = end_time - start_time
+            # check if the modified tokens are the same as the target tokens
+            if modified_tokens != target_tokens:
+                error_count += 1
+                error_items.append({
+                    "source_text":source_text,
+                    "target_text":target_text,
+                    "modified_text": tokenizer.decode(modified_tokens),
+                    # "target_tokens":target_tokens
+                })
+            
+            
+            plot_data_x.append(len(source_tokens)+len(target_tokens))
+            plot_data_y.append(processing_time*1000)  # 转换为毫秒
     
-    test3 = "banana"
-    # tokens3 = tokenizer.encode(test3)
-    get_key_value(llm,test3,"examples/pipeline/data/kv/test3")
-    
-    test4 = "orange"
-    # tokens4 = tokenizer.encode(test4)
-    get_key_value(llm,test4,"examples/pipeline/data/kv/test4")
-
-    
-    
-def get_kv(kv_save_dir:str,token_save_dir:str,tag:str,split=None):
-    kvs = torch.load(os.path.join(kv_save_dir,tag,"kv.pth"))
-    token = json.load(open(os.path.join(token_save_dir,tag,"token.json"),"r"))
-    
-    
-    num_layer = len(kvs)
-    for i in range(num_layer):
-        if split != None:
-            start_idx,end_idx = split
-            kvs[i][0] = kvs[i][0][start_idx:end_idx,:]
-            kvs[i][1] = kvs[i][1][start_idx:end_idx,:]
-            token = token[start_idx:end_idx]
-        kvs[i] = torch.stack(kvs[i],dim=0)
-    
-    kvs = torch.stack(kvs,dim=0).permute(2,1,0,3)
-    return kvs,token
-
-def custom_hash(int_list):
-    import hashlib
-    # 将列表转换为字符串
-    list_str = ','.join(map(str, int_list))
-
-    # 使用 SHA-256 算法进行哈希
-    hasher = hashlib.sha256()
-    hasher.update(list_str.encode('utf-8'))
-    hashed_value = hasher.hexdigest()
-    return hashed_value
-
-def plot_kv_acc(save_dir:str):
-    import matplotlib.pyplot as plt
-    
-    # 设置图表风格
-    # plt.style.use('seaborn')
+    # 创建图表
     plt.figure(figsize=(10, 6))
     
-    real_kvs, real_tokens = get_kv(save_dir, save_dir, "test1")
+    # 绘制散点图
+    plt.scatter(plot_data_x, plot_data_y, 
+               alpha=0.5,        # 设置透明度
+               s=20,            # 点的大小
+               c=plot_data_y,   # 使用处理时间作为颜色
+               cmap='viridis')  # 使用viridis颜色映射
     
-    chunk_set = dict()
-    chunk_tag = ["test2", "test3", "test4"]
-    for i in range(len(chunk_tag)):
-        chunk_kv, chunk_token = get_kv(save_dir, save_dir, chunk_tag[i])
-        chunk_set[chunk_token[0]] = (chunk_kv[0], chunk_token)
-        print("save chunk", chunk_token[0])
+    # 设置y轴为对数刻度
+    plt.yscale('log')
     
-    key_errs = []
-    value_errs = []
-    num_layer = 28
-    for i in range(num_layer):
-        layer_ids = list(range(0, i))
-        avg_key_err = []
-        avg_value_err = []
-        for pos, token in enumerate(real_tokens):
-            if token in chunk_set:
-                real_token_kv = real_kvs[pos]
-                chunk_pos = chunk_set[token][0]
-                
-                key_err = torch.sum(torch.abs(real_token_kv[0,layer_ids,:] - chunk_pos[0,layer_ids,:]))
-                value_err = torch.sum(torch.abs(real_token_kv[1,layer_ids,:] - chunk_pos[1,layer_ids,:]))
-                avg_key_err.append(key_err.item())
-                avg_value_err.append(value_err.item())
-        key_errs.append(sum(avg_key_err)/len(avg_key_err) if avg_key_err else 0)
-        value_errs.append(sum(avg_value_err)/len(avg_value_err) if avg_value_err else 0)
+    # 添加颜色条
+    plt.colorbar(label='Processing Time (ms)')
     
-    # 绘制曲线
-    plt.plot(list(range(num_layer)), key_errs, 
-             label='Key Error', 
-             color='#1f77b4', 
-             linewidth=2, 
-             marker='o',
-             markersize=6)
-    plt.plot(list(range(num_layer)), value_errs, 
-             label='Value Error', 
-             color='#2ca02c', 
-             linewidth=2, 
-             marker='s',
-             markersize=6)
+    # 设置轴标签
+    plt.xlabel('Total Text Length (tokens)')
+    plt.ylabel('Processing Time (ms) - Log Scale')
     
-    # 设置x轴刻度
-    plt.xticks(range(num_layer))  # 显示所有整数刻度
+    # 设置标题
+    plt.title('Text Length vs Processing Time (Log Scale)')
     
-    # 设置图表属性
-    plt.xlabel('Layer Number', fontsize=15)
-    plt.ylabel('Error', fontsize=15)
-    # plt.title('Key-Value Error across Layers', fontsize=14)
-    plt.grid(True, linestyle='--', alpha=0.7)
-    plt.legend(fontsize=14, loc='upper left')
+    # 添加网格（对数刻度下的网格）
+    plt.grid(True, linestyle='--', alpha=0.7, which='both')  # 'both' 表示主要和次要网格线都显示
     
-    # 调整布局并保存
-    plt.tight_layout()
-    plt.savefig("examples/pipeline/images/kv_acc.png", dpi=300, bbox_inches='tight')
-        
+    # 保存图片
+    plt.savefig('examples/pipeline/images/edit_time_log.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Error count: {error_count}")
+    print(f"Error rate: {error_count/len(plot_data_x):.4f}")
+    print(f"Average processing time: {np.mean(plot_data_y):.2f} ms")
+    print(f"Max processing time: {max(plot_data_y):.2f} ms")
+    print(f"Min processing time: {min(plot_data_y):.2f} ms")
+    
+    json.dump(error_items,open(error_edit_path,"w"),indent=4,ensure_ascii=False)
+
 if __name__ == "__main__":
     
-    gen_kv()
+    
+    analyze_token_reuse_rate("examples/dataset/data/similar/instruction_wildv2/instruction_wildv2_batch_embeddings_clusters.json",
+                             "examples/dataset/data/similar/instruction_wildv2/error_edit.json")
+    
     # plot_kv_acc("examples/pipeline/data/kv")
-
+    pass
     
