@@ -15,6 +15,7 @@ import time
 from multiprocessing import Process, Queue, cpu_count
 import queue
 from multiprocessing import Pool
+import pandas as pd
 
 font_path = "/root/code/vllm_plus/examples/dataset/data/fonts"
  
@@ -229,26 +230,61 @@ def plot_similarity_reuse_rate(data):
     plt.close()
 
 def plot_window_size_reuse_rate(data_path:str):
-    # 创建图表
-    plt.figure(figsize=(12, 8))
-    points_x = []
-    points_y = []
+    plt.figure(figsize=(15, 10))
+    
+    # 创建子图
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 8))
+    
+    # 收集数据
+    window_reuse_rates = [[] for _ in range(5)]
     data = json.load(open(data_path))
+    
     for pair in tqdm(data):
         if len(pair["window_size"]) == 0:
             continue
-        window_size,reuse_rate,time = pair["window_size"][0]
-        target_length = len(pair["target_token"])
-        points_x.append(window_size)
-        points_y.append(reuse_rate)
-    plt.scatter(points_x,points_y,s=10,c="blue",alpha=0.7)
+        for window_data in pair["window_size"]:
+            window_size, reuse_rate, _ = window_data
+            window_reuse_rates[window_size-1].append(reuse_rate)
     
+    # 绘制箱线图
+    box_data = [rates for rates in window_reuse_rates if rates]  # 过滤掉空列表
+    ax1.boxplot(box_data, labels=[f'w={i+1}' for i in range(len(box_data))])
+    ax1.set_xlabel('Window Size')
+    ax1.set_ylabel('Reuse Rate (%)')
+    ax1.set_title('Distribution of Reuse Rates by Window Size (Box Plot)')
+    ax1.grid(True, alpha=0.3)
     
-    plt.xlabel("window_size")
-    plt.ylabel("reuse_rate")
-    plt.legend()
-    plt.title("window_size and reuse_rate")
-    plt.savefig("examples/pipeline/images/window_size_reuse_rate.png",dpi=300,bbox_inches="tight")
+    # 绘制小提琴图
+    import seaborn as sns
+    # 准备数据为长格式
+    violin_data = []
+    for window_size, rates in enumerate(window_reuse_rates, 1):
+        violin_data.extend([(window_size, rate) for rate in rates])
+    
+    violin_df = pd.DataFrame(violin_data, columns=['Window Size', 'Reuse Rate'])
+    sns.violinplot(data=violin_df, x='Window Size', y='Reuse Rate', ax=ax2)
+    ax2.set_title('Distribution of Reuse Rates by Window Size (Violin Plot)')
+    ax2.grid(True, alpha=0.3)
+    
+    # 添加统计信息
+    # stats_text = "Statistical Summary:\n"
+    # for window_size, rates in enumerate(window_reuse_rates, 1):
+    #     if rates:
+    #         stats_text += f"\nWindow Size {window_size}:\n"
+    #         stats_text += f"Mean: {np.mean(rates):.2f}%\n"
+    #         stats_text += f"Median: {np.median(rates):.2f}%\n"
+    #         stats_text += f"Std: {np.std(rates):.2f}%\n"
+    #         stats_text += f"25th: {np.percentile(rates, 25):.2f}%\n"
+    #         stats_text += f"75th: {np.percentile(rates, 75):.2f}%\n"
+    
+    # 在图形下方添加统计信息
+    # plt.figtext(0.1, -0.2, stats_text, fontsize=10, ha='left', va='top')
+    
+    plt.tight_layout()
+    plt.savefig("examples/pipeline/images/window_size_reuse_rate.png", 
+                dpi=300, 
+                bbox_inches='tight',
+                pad_inches=0.5)
     plt.close()
 
 if __name__ == "__main__":

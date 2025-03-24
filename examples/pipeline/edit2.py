@@ -4,7 +4,7 @@ import time
 import matplotlib.pyplot as plt
 import numpy as np
 import json
-# from intervaltree import IntervalTree
+import torch
 from functools import lru_cache
 
 def find_text_differences(source_tokens, target_tokens, window_size=2,tokenizer=None):
@@ -171,8 +171,8 @@ def find_text_differences(source_tokens, target_tokens, window_size=2,tokenizer=
     def analyze_text_changes(source_tokens, target_tokens, common_segments,tokenizer=None):
         """分析文本变化，找出相同子串需要的移动操作"""
         # FIXME: 合并片段会出现出问题
-        # merged_segments = merge_overlapping_segments(common_segments)
-        merged_segments = common_segments
+        merged_segments = merge_overlapping_segments(common_segments)
+        # merged_segments = common_segments
         moves = []
         
         # 使用集合来优化查找操作
@@ -185,9 +185,7 @@ def find_text_differences(source_tokens, target_tokens, window_size=2,tokenizer=
         reused_count = len(reused_tokens)
         reuse_ratio = reused_count / len(target_tokens) * 100
         
-        # reused_count = len(target_tokens) - reused_tokens
-        # reuse_ratio = reused_count / len(target_tokens) * 100
-        
+
         # 对每个匹配的子串，记录其移动操作（包括位置相同的）
         for segment in merged_segments:
             source_start, source_end = segment["source_span"]
@@ -329,13 +327,30 @@ def apply_text_changes(source_tokens: list, target_tokens: list, diff_report: di
     return result
 
 
-def apply_change(source_tokens: list, target_tokens: list, source_kvcache):
-    target_kvcache = []
-    pass
+def apply_change(source_tokens: list, target_tokens: list, source_kvcache: torch.Tensor, diff_report:dict):
+    """
+    根据差异报告对源tokens进行修改
+    Args:
+        source_tokens: 源文本的token序列
+        target_tokens: 目标文本的token序列
+        source_kvcache: 源kvcache, shape[layer, 2, token, head*dim]
+        diff_report: 差异报告
+    """
+    # 先根据目标文本生成申请内存
+    num_layer,_,_,dim = source_kvcache.shape
+    target_kvcache = torch.zeros([num_layer,2,len(target_tokens),dim])
+    reused_map_indices = []
+    # 根据diff_report的moves信息，将source_kvcache中的token移动到target_kvcache中
+    for move in diff_report['moves']:       
+        source_start, source_end = move['from_position']
+        target_start, target_end = move['to_position']
+        target_kvcache[:,:,target_start:target_end+1,:] = source_kvcache[:,:,source_start:source_end+1,:]
+        reused_map_indices.extend(list(range(target_start,target_end+1)))
+    # 计算得到未复用kvcache的索引
+    unreused_map_indices = list(set(list(range(len(target_tokens)))) - set(reused_map_indices))
+    # 将未复用kvcache的索引对应的kvcache设置为0
+    return target_kvcache,reused_map_indices,unreused_map_indices
     
-
-
-
 def test_performance(data_path:str):
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
     data = json.load(open(data_path))
@@ -368,11 +383,19 @@ if __name__ == "__main__":
     target_text = "Can you write a Synonyms for these words:\n\nboomer\nbursar\nbutty\ncadge\ncarbonization\n\nand after you generate them turn them with the words i already gave you into Arabic"    
     source_tokens = tokenizer.encode(source_text)
     target_tokens = tokenizer.encode(target_text)
-    diff_report = find_text_differences(source_tokens, target_tokens,window_size=3,tokenizer=tokenizer)
-    modified_tokens = apply_text_changes(source_tokens, target_tokens, diff_report, tokenizer,show_detail=True)
-    # for segment in diff_report["common_segments"]:
-    #     print(tokenizer.decode(segment["text"]))
-    # for move in diff_report["moves"]:
-    #     print(move["text"],move["from_position"],move["to_position"])
+    
+    source_kvcache = torch.randn([28,2,len(source_tokens),256])
+    diff_report = find_text_differences(source_tokens, target_tokens, window_size=3)
+    target_kvcache,reused_map_indices,unused_map_indices = apply_change(source_tokens, target_tokens, source_kvcache, diff_report)
+    modified_tokens = apply_text_changes(source_tokens, target_tokens, diff_report, tokenizer)
+    print(target_kvcache.shape)
+    print(reused_map_indices)
+    print(unused_map_indices)
+    reuse_rate = len(reused_map_indices)/len(target_tokens)
+    # # for segment in diff_report["common_segments"]:
+    # #     print(tokenizer.decode(segment["text"]))
+    # # for move in diff_report["moves"]:
+    # #     print(move["text"],move["from_position"],move["to_position"])
     print("reuse_ratio:",diff_report["summary"]["reuse_ratio"])
+    # print("reuse_rate:",reuse_rate)
     print("correct:",modified_tokens == target_tokens)
