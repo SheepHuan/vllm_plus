@@ -7,7 +7,26 @@ import json
 import torch
 from functools import lru_cache
 
-def find_text_differences(source_tokens, target_tokens, window_size=2,tokenizer=None):
+def preprocess_tokens(source, target, synonym_dict):
+    if not synonym_dict:
+        return source, target
+        
+    # 构建反向映射表（近义词token -> 主token）
+    reverse_map = {}
+    for main_token, synonyms in synonym_dict.items():
+        # 主token映射到自身
+        reverse_map[main_token] = main_token
+        # 所有近义词都映射到主token
+        for syn_token in synonyms:
+            reverse_map[syn_token] = main_token
+
+    # 替换token序列中的近义词
+    processed_source = [reverse_map.get(t, t) for t in source]
+    processed_target = [reverse_map.get(t, t) for t in target]
+    
+    return processed_source, processed_target
+
+def find_text_differences(source_tokens, target_tokens, window_size=2,tokenizer=None,synonym_dict = None):
     """
     使用Rabin-Karp算法比较两段文本的差异，找出可复用的文本片段
     Args:
@@ -19,58 +38,13 @@ def find_text_differences(source_tokens, target_tokens, window_size=2,tokenizer=
         dict: 包含匹配片段、移动操作和统计信息的差异报告
     """
     # 输入参数验证
+   
     if not source_tokens or not target_tokens:
-        raise ValueError("源文本和目标文本不能为空")
-    
-    # # 哈希算法参数
-    # HASH_BASE = 256
-    # HASH_MODULUS = 1_000_000_007
-    
-    # # 预计算哈希基数幂，避免重复计算
-    # hash_powers = [pow(HASH_BASE, i, HASH_MODULUS) for i in range(max(len(source_tokens), len(target_tokens)))]
-    
-    # def compute_rolling_hash(tokens, start_pos, window_size, previous_hash=None):
-    #     if previous_hash is None:
-    #         # 使用预计算的幂加速初始哈希计算
-    #         current_hash = 0
-    #         for i in range(window_size):
-    #             current_hash = (current_hash + tokens[start_pos + i] * hash_powers[i]) % HASH_MODULUS
-    #         return current_hash
-        
-    #     # 优化滚动哈希更新
-    #     return ((previous_hash - tokens[start_pos - 1]) * HASH_BASE + 
-    #             tokens[start_pos + window_size - 1]) % HASH_MODULUS
+            raise ValueError("源文本和目标文本不能为空")
+    source_tokens, target_tokens = preprocess_tokens(
+        source_tokens, target_tokens, synonym_dict
+    )
 
-    # # 初始化匹配状态跟踪
-    # source_length = len(source_tokens)
-    # target_length = len(target_tokens)
-    # matched_positions_source = [False] * source_length
-    # matched_positions_target = [False] * target_length
-    # matching_segments = []
-    
-    # # 构建源文本的哈希索引表
-    # source_hash_table = {}
-    # current_hash = None
-    # for source_pos in range(source_length - window_size + 1):
-    #     current_hash = compute_rolling_hash(source_tokens, source_pos, window_size, current_hash)
-    #     source_hash_table.setdefault(current_hash, []).append(source_pos)
-    
-    # # 在目标文本中查找匹配
-    # current_hash = None
-    # for target_pos in range(target_length - window_size + 1):
-    #     current_hash = compute_rolling_hash(target_tokens, target_pos, window_size, current_hash)
-    #     if current_hash in source_hash_table:
-    #         # 处理哈希碰撞，验证实际内容
-    #         for source_pos in source_hash_table[current_hash]:
-    #             if source_tokens[source_pos:source_pos+window_size] == target_tokens[target_pos:target_pos+window_size]:
-    #                 matching_segments.append({
-    #                     "source_span": (source_pos, source_pos+window_size-1),
-    #                     "target_span": (target_pos, target_pos+window_size-1),
-    #                     "text": source_tokens[source_pos:source_pos+window_size]
-    #                 })
-    #                 # 标记已匹配的位置
-    #                 matched_positions_source[source_pos:source_pos+window_size] = [True] * window_size
-    #                 matched_positions_target[target_pos:target_pos+window_size] = [True] * window_size
     def rolling_hash(tokens, start, window_size, prev_hash=None):
         if prev_hash is None:
             hash_val = 0
@@ -378,24 +352,79 @@ if __name__ == "__main__":
     
     
     # AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
+    # tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
+    # source_text = "Can you write a Synonyms for these words:\n\nbelarusian\nbhopal\nbigamous\nFell\nsought-after\nand after you generate them Translate them with the words i already gave you into Arabic"
+    # target_text = "Can you write a synonyms for these words:\n\nboomer\nbursar\nbutty\ncadge\ncarbonization\n\nand after you generate them turn them with the words i already gave you into Arabic"    
+    # source_tokens = tokenizer.encode(source_text)
+    # target_tokens = tokenizer.encode(target_text)
+    
+    # source_kvcache = torch.randn([28,2,len(source_tokens),256])
+    # diff_report = find_text_differences(source_tokens, target_tokens, window_size=3)
+    # target_kvcache,reused_map_indices,unused_map_indices = apply_change(source_tokens, target_tokens, source_kvcache, diff_report)
+    # synonyms_text = {"Synonyms": ["Synonyms", "synonyms"]}
+    # synonyms_tokens = {}
+    # for key,synonyms in synonyms_text.items():
+    #     for i in synonyms:
+    #         synonyms_tokens[tokenizer.encode(key)[0]] = tokenizer.encode(i)[0]
+    
+    # modified_tokens = apply_text_changes(source_tokens, target_tokens, diff_report, tokenizer,synonyms_tokens)
+    # print(target_kvcache.shape)
+    # print(reused_map_indices)
+    # print(unused_map_indices)
+    # reuse_rate = len(reused_map_indices)/len(target_tokens)
+    # # # for segment in diff_report["common_segments"]:
+    # # #     print(tokenizer.decode(segment["text"]))
+    # # # for move in diff_report["moves"]:
+    # # #     print(move["text"],move["from_position"],move["to_position"])
+    # print("reuse_ratio:",diff_report["summary"]["reuse_ratio"])
+    # # print("reuse_rate:",reuse_rate)
+    # print("correct:",modified_tokens == target_tokens)
+    
+    
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
-    source_text = "Can you write a Synonyms for these words:\n\nbelarusian\nbhopal\nbigamous\nFell\nsought-after\nand after you generate them Translate them with the words i already gave you into Arabic"
-    target_text = "Can you write a Synonyms for these words:\n\nboomer\nbursar\nbutty\ncadge\ncarbonization\n\nand after you generate them turn them with the words i already gave you into Arabic"    
+    
+    
+    # a = 'Synonyms'
+    # b = 'synonyms'
+    # c = ' Synonyms'
+    
+    # token_a = tokenizer.encode(a)
+    # for i in token_a:
+    #     print(tokenizer.decode([i]),end=' ')
+    # print()
+    # token_b = tokenizer.encode(b)
+    # for i in token_b:   
+    #     print(tokenizer.decode([i]),end=' ')
+    # print()
+    # token_c = tokenizer.encode(c)
+    # for i in token_c:
+    #     print(tokenizer.decode([i]),end=' ')
+    # print()
+    # 构建近义词字典（使用token ID）
+    # synonyms_dict = {
+    #     tokenizer.encode("Synonyms")[0]: [
+    #         tokenizer.encode("Synonyms")[0],
+    #         tokenizer.encode("synonyms")[0]
+    #     ],
+    #     # 可以添加更多近义词组
+    # }
+    
+    # source_text = "Can you write a Synonyms for these words..."
+    # target_text = "Can you write a synonyms for these words..."
+    source_text= "Classify the following keyword list in groups based on their search intent, whether commercial, transactional or informational:\npadel\npadel tennis\npadel racket\npadel court\npadel london\npadel courts\nstratford padel club\npdel courts london\npadel rackets\npadel tennis near me\npadel courts near me\npadel sport\npadel tennis london\nworld padel tour\npadels\npadel ball\npadel rules\npadel rackets uk\npadel shoes\nadidas padel\nasics padel\npadel shop\npadel player\neverything padel\nbest padel rackets 2021"
+    target_text= "Translate the following keywords from English to Spanish and generate the results in a table with two columns, with the keywords in English in the first one and their translation to Spanish in the second:\npadel\npadel tennis\npadel racket\npadel court\npadel london\nstratford padel club\npdel courts london\npadel rackets\npadel tennis near me\npadel courts near me\npadel sport\npadel tennis london\nworld padel tour\npadels\npadel ball\npadel rules\npadel shoes\nadidas padel\nasics padel\npadel shop\npadel player\neverything padel\nbest padel rackets 2021"
+    
     source_tokens = tokenizer.encode(source_text)
     target_tokens = tokenizer.encode(target_text)
     
-    source_kvcache = torch.randn([28,2,len(source_tokens),256])
-    diff_report = find_text_differences(source_tokens, target_tokens, window_size=3)
-    target_kvcache,reused_map_indices,unused_map_indices = apply_change(source_tokens, target_tokens, source_kvcache, diff_report)
-    modified_tokens = apply_text_changes(source_tokens, target_tokens, diff_report, tokenizer)
-    print(target_kvcache.shape)
-    print(reused_map_indices)
-    print(unused_map_indices)
-    reuse_rate = len(reused_map_indices)/len(target_tokens)
-    # # for segment in diff_report["common_segments"]:
-    # #     print(tokenizer.decode(segment["text"]))
-    # # for move in diff_report["moves"]:
-    # #     print(move["text"],move["from_position"],move["to_position"])
-    print("reuse_ratio:",diff_report["summary"]["reuse_ratio"])
-    # print("reuse_rate:",reuse_rate)
-    print("correct:",modified_tokens == target_tokens)
+    # 在find_text_differences中传入近义词字典
+    diff_report = find_text_differences(
+        source_tokens, 
+        target_tokens, 
+        window_size=3,
+        tokenizer=tokenizer,
+        synonym_dict=None
+    )
+    for move in diff_report["moves"]:
+        print(move["text"],move["from_position"],move["to_position"])
+    print(diff_report["summary"]["reuse_ratio"])
