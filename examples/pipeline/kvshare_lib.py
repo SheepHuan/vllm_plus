@@ -474,5 +474,9 @@ if __name__ == "__main__":
     kvshare.use_semantic_search = True
     kvshare.save_kvcache = False
     
-    kvshare.generate_with_kvshare(text2)
+    # output,metric = kvshare.generate_with_kvshare(text2)
+    for i in range(10):
+        # kvshare.generate_with_kvshare(text2)
+        kvshare.generate(text2)
+    # print(metric)
     # kvshare.generate_with_cacheblend(text2,text1)

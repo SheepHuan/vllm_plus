@@ -22,10 +22,11 @@ model_name = [
     "Alibaba-NLP/gte-Qwen2-7B-instruct",
     "intfloat/multilingual-e5-large-instruct",
     "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
+    "sentence-transformers/all-MiniLM-L6-v2"
 ]
 
 class CustomEmbedder:
-    def __init__(self, model_name,device: str = "cuda:0"):
+    def __init__(self, model_name,device: str = "cuda:1"):
         self.model = SentenceTransformer(model_name).to(device).to(torch.bfloat16)
 
     def embed_texts(self, texts: List[str]):
@@ -39,15 +40,18 @@ class CustomEmbedder:
         token_ids = self.model.tokenize(texts)
         return token_ids
 
-    def query_embed(self, query: List[str], texts: List[str]):
-        query_token_ids = self.tokenize_texts(query)
-        texts_token_ids = self.tokenize_texts(texts)
-        print("query_token_ids: ",query_token_ids['input_ids'].shape)
-        print("texts_token_ids: ",texts_token_ids['input_ids'].shape)
-        query_embed = self.embed_texts(query)
-        texts_embed = self.embed_texts(texts)
-        scores = (query_embed @ texts_embed.T) * 100
-        return scores
+    def query_embed(self, source: List[str], targets: List[str]):
+        # query_token_ids = self.tokenize_texts(source)
+        # texts_token_ids = self.tokenize_texts(targets)
+        # print("query_token_ids: ",query_token_ids['input_ids'].shape)
+        # print("texts_token_ids: ",texts_token_ids['input_ids'].shape)
+        query_embed = self.embed_texts(source)
+        texts_embed = self.embed_texts(targets)
+        similarity = np.dot(query_embed[0], texts_embed[0]) / (
+                np.linalg.norm(query_embed[0]) * np.linalg.norm(texts_embed[0])
+            )
+        # scores = (query_embed @ texts_embed.T) * 100
+        return similarity
     
     def profile_embed_texts(self, texts: str):
         # tokens = self.tokenize_texts([texts])
@@ -102,7 +106,7 @@ def delta(embedder: CustomEmbedder):
     
     
 if __name__ == "__main__":
-    index = 1
+    index = 3
     embedder = CustomEmbedder(model_name[index])
     delta(embedder)
     

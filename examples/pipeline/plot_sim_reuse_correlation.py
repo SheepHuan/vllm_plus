@@ -100,17 +100,17 @@ def process_cluster(args):
     pair_id = start_pair_id
     if len(members) > max_size:
         members = random.sample(members,max_size)
-    for i in range(len(members)):
-        for j in range(i+1, len(members)):
-            pairs.append({
-                    "pair_id": pair_id,
-                    "source": members[i]["text"],
-                    "target": members[j]["text"],
-                    "source_token": tokenizer.encode(members[i]["text"]),
-                    "target_token": tokenizer.encode(members[j]["text"]),
-                "cluster_id": cluster_id
-                })
-            pair_id += 1
+        for i in range(len(members)):
+            for j in range(i+1, len(members)):
+                pairs.append({
+                        "pair_id": pair_id,
+                        "source": members[i]["text"],
+                        "target": members[j]["text"],
+                        "source_token": tokenizer.encode(members[i]["text"]),
+                        "target_token": tokenizer.encode(members[j]["text"]),
+                    "cluster_id": cluster_id
+                    })
+                pair_id += 1
             
     return pairs
 
@@ -203,7 +203,7 @@ def compute_similarity(clean_path:str, save_path:str, batch_size:int=64, model_n
             similarity = np.dot(source_embeddings[j], target_embeddings[j]) / (
                 np.linalg.norm(source_embeddings[j]) * np.linalg.norm(target_embeddings[j])
             )
-            pair["cosine_similarity"] = float(similarity)
+        pair["cosine_similarity"] = float(similarity)
     
     
     print(f"\n保存结果到 {save_path}")
@@ -297,7 +297,13 @@ def get_windowsize_diff_and_reuse(data_path: str, save_path: str):
     """
     # 加载数据
     print("加载数据...")
+    import ijson
+    with open(data_path, "r") as f:
+        for item in ijson.items(f, "high_quality_pairs"):
+            pass
+    
     data = json.load(open(data_path))
+    # data = data["high_quality_pairs"]
     
     # 设置进程数和批次大小
     num_processes = min(128, cpu_count())
@@ -350,7 +356,7 @@ def get_windowsize_diff_and_reuse(data_path: str, save_path: str):
     print(f"平均处理时间: {avg_time:.2f}ms/对")
 
 
-def plot_similarity_reuse_rate(data):
+def plot_similarity_reuse_rate(data,save_path:str):
     """创建多子图布局，展示多个数据集的复用率-相似度关系
     
     Args:
@@ -550,7 +556,7 @@ def plot_similarity_reuse_rate(data):
     plt.colorbar(last_im, cax=cbar_ax, label='Normalized Density')
     
     plt.tight_layout()
-    plt.savefig("examples/pipeline/images/similarity_reuse_rate_analysis.png",
+    plt.savefig(save_path,
                 dpi=300, bbox_inches="tight")
     plt.close()
 
@@ -852,113 +858,159 @@ def compute_kverr_between_high_correlation(data_path:str,save_path:str,device:st
                 )
     template = "<|im_start|>user\n{prompt}\n<|im_end|>"
     paris = json.load(open(data_path))["high_quality_pairs"]
-    # paris = paris[:10]
+    paris = random.sample(paris,min(len(paris),10000))
     kverr_data = []
     for pair in tqdm(paris,desc="计算KV误差"):
-        source_prompt = template.format(prompt=pair["source"])
-        target_prompt = template.format(prompt=pair["target"])
-        source_kv,source_token = get_key_value(model,source_prompt)
-        target_kv,target_token = get_key_value(model,target_prompt)
+        try:
+            source_prompt = template.format(prompt=pair["source"])
+            target_prompt = template.format(prompt=pair["target"])
+            source_kv,source_token = get_key_value(model,source_prompt)
+            target_kv,target_token = get_key_value(model,target_prompt)
         # 计算编辑KV，然后组合得到KV
-        diff_report = find_text_differences(source_token,target_token,window_size=1)
-        modified_kv,reused_map_indices,_ = apply_change(source_token,target_token,source_kv,diff_report)
-        
-        target_kv = target_kv[:,:,reused_map_indices,:]
-        modified_kv = modified_kv[:,:,reused_map_indices,:]
-        
-        # 计算不同层的KV误差值
-        kv_err = target_kv - modified_kv 
-        # 区分key，value
-        key_err = kv_err[:,0,:,:]
-        value_err= kv_err[:,1,:,:]
-        # 计算每层KV误差值的平均值
-        key_err_layer_mean = key_err.mean(dim=[1,2])
-        value_err_layer_mean = value_err.mean(dim=[1,2])
-        # 计算每层KV误差值的方差
-        key_err_layer_std = key_err.std(dim=[1,2])
-        value_err_layer_std = value_err.std(dim=[1,2])
-        # 计算每层KV误差值的L2范数
-        key_err_layer_l2 = key_err.norm(dim=[1,2])
-        value_err_layer_l2 = value_err.norm(dim=[1,2])
-        
-        kverr_data.append({
-            "source":pair["source"],
-            "target":pair["target"],
-            "source_token":source_token,
-            "target_token":target_token,
-            "key_err_layer_mean":key_err_layer_mean.tolist(),
-            "value_err_layer_mean":value_err_layer_mean.tolist(),
-            "key_err_layer_std":key_err_layer_std.tolist(),
-            "value_err_layer_std":value_err_layer_std.tolist(),
-            "key_err_layer_l2":key_err_layer_l2.tolist(),
-            "value_err_layer_l2":value_err_layer_l2.tolist(),
-            "cosine_similarity":pair["cosine_similarity"],
-            "reuse_rate":pair["reuse_rate"],
-        })
+            diff_report = find_text_differences(source_token,target_token,window_size=1)
+            modified_kv,reused_map_indices,_ = apply_change(source_token,target_token,source_kv,diff_report)
+            
+            target_kv = target_kv[:,:,reused_map_indices,:]
+            modified_kv = modified_kv[:,:,reused_map_indices,:]
+            
+            # 计算不同层的KV误差值
+            kv_err = torch.abs(target_kv - modified_kv)
+            # 区分key，value
+            key_err = kv_err[:,0,:,:]
+            value_err= kv_err[:,1,:,:]
+            # 计算每层KV误差值的平均值
+            key_err_layer_mean = key_err.mean(dim=[1,2])
+            value_err_layer_mean = value_err.mean(dim=[1,2])
+            # 计算每层KV误差值的方差
+            key_err_layer_std = key_err.std(dim=[1,2])
+            value_err_layer_std = value_err.std(dim=[1,2])
+            # 计算每层KV误差值的L2范数
+            key_err_layer_l2 = key_err.norm(dim=[1,2])
+            value_err_layer_l2 = value_err.norm(dim=[1,2])
+            
+            kverr_data.append({
+                "source":pair["source"],
+                "target":pair["target"],
+                "source_token":source_token,
+                "target_token":target_token,
+                "key_err_layer_mean":key_err_layer_mean.tolist(),
+                "value_err_layer_mean":value_err_layer_mean.tolist(),
+                "key_err_layer_std":key_err_layer_std.tolist(),
+                "value_err_layer_std":value_err_layer_std.tolist(),
+                "key_err_layer_l2":key_err_layer_l2.tolist(),
+                "value_err_layer_l2":value_err_layer_l2.tolist(),
+                "cosine_similarity":pair["cosine_similarity"],
+                "reuse_rate":pair["reuse_rate"],
+            })
+        except Exception as e:
+            print(f"计算KV误差时出错: {e}")
+            continue
     with open(save_path,"w") as f:
         json.dump(kverr_data,f,indent=4)
 
-def plot_kverr_distribution(data_path: str, layer_num: int = 28, show_full_reuse: bool = True):
-    """绘制KV缓存误差分布与token重用率的关系
+def plot_kverr_distribution(data_list: List[dict], show_full_reuse: bool = True):
+    """绘制多个数据集的KV缓存误差分布与token重用率的关系
     
     Args:
-        data_path: 数据文件路径
-        layer_num: 模型层数
+        data_list: 包含多个数据集信息的列表，每个元素需包含:
+            - tag: 数据集标签
+            - path: 数据文件路径
+            - color: 绘图颜色
         show_full_reuse: 是否显示重用率为100%的数据点
     """
     import seaborn as sns
-    data = json.load(open(data_path))
     
-    # 1. 收集数据
-    all_data = []
+    # 计算子图布局
+    n_datasets = len(data_list)
+    n_rows = (n_datasets + 1) // 2  # 向上取整
+    n_cols = min(2, n_datasets)  # 最多2列
     
-    for item in data:
-        reuse_rate = item["reuse_rate"]
-        # 如果不显示完全重用的数据点且重用率为1，则跳过
-        if not show_full_reuse and reuse_rate >= 0.99:
-            continue
-            
-        for layer_id in range(layer_num):
-            # 添加key误差数据
-            all_data.append({
-                "layer_id": layer_id,
-                "reuse_rate": reuse_rate,
-                "error_value": abs(item["key_err_layer_mean"][layer_id]),
-                "error_type": "Key Error"
-            })
-            
-            # 添加value误差数据
-            all_data.append({
-                "layer_id": layer_id,
-                "reuse_rate": reuse_rate,
-                "error_value": abs(item["value_err_layer_mean"][layer_id]),
-                "error_type": "Value Error"
-            })
+    # 创建图表
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(10*n_cols, 8*n_rows))
+    if n_datasets == 1:
+        axes = np.array([axes])  # 确保axes是数组
     
-    df = pd.DataFrame(all_data)
-    
-    # 创建单个图表
-    plt.figure(figsize=(10, 8))
-    
-    # 计算每个重用率下的平均误差
-    mean_errors = df.groupby(["reuse_rate", "error_type"])["error_value"].mean().reset_index()
-    
-    # 绘制散点图和趋势线
-    for err_type in ["Key Error", "Value Error"]:
-        err_data = mean_errors[mean_errors["error_type"] == err_type]
-        sns.scatterplot(data=err_data,
-                       x="reuse_rate", y="error_value",
-                       alpha=0.5, label=err_type)
-        sns.regplot(data=err_data,
-                   x="reuse_rate", y="error_value",
-                   scatter=False)
-    
-    title = "Average KV Error vs Token Reuse Rate"
-    if not show_full_reuse:
-        title += " (Excluding 100% Reuse)"
-    plt.title(title)
-    plt.xlabel("Token Reuse Rate")
-    plt.ylabel("Average Error")
+    # 处理每个数据集
+    for idx, item in enumerate(data_list):
+        row = idx // 2
+        col = idx % 2
+        ax = axes[row, col] if n_rows > 1 else axes[col]
+        
+        # 加载数据
+        data = json.load(open(item["path"]))
+        all_data = []
+        
+        # 收集数据
+        for entry in data:
+            reuse_rate = entry["reuse_rate"]
+            if not show_full_reuse and reuse_rate >= 0.99:
+                continue
+                
+            for layer_id in range(28):  # 假设28层
+                # 添加key误差数据
+                all_data.append({
+                    "layer_id": layer_id,
+                    "reuse_rate": reuse_rate,
+                    "error_value": abs(entry["key_err_layer_mean"][layer_id]),
+                    "error_type": "Key Error"
+                })
+                
+                # 添加value误差数据
+                all_data.append({
+                    "layer_id": layer_id,
+                    "reuse_rate": reuse_rate,
+                    "error_value": abs(entry["value_err_layer_mean"][layer_id]),
+                    "error_type": "Value Error"
+                })
+        
+        df = pd.DataFrame(all_data)
+        
+        # 计算每个重用率下的平均误差
+        mean_errors = df.groupby(["reuse_rate", "error_type"])["error_value"].mean().reset_index()
+        
+        # 设置颜色
+        colors = {
+            "Key Error": {
+                "scatter": "blue",  # 淡蓝色散点
+                "line": "darkblue"       # 深蓝色趋势线
+            },
+            "Value Error": {
+                "scatter": "orange",     # 淡橙色散点
+                "line": "darkorange"     # 深橙色趋势线
+            }
+        }
+        
+        # 绘制散点图和趋势线
+        for err_type in ["Key Error", "Value Error"]:
+            err_data = mean_errors[mean_errors["error_type"] == err_type]
+            # 绘制散点图
+            sns.scatterplot(data=err_data,
+                          x="reuse_rate", y="error_value",
+                          alpha=0.5, label=err_type,
+                          color=colors[err_type]["scatter"],
+                          ax=ax)
+            # 绘制趋势线
+            sns.regplot(data=err_data,
+                      x="reuse_rate", y="error_value",
+                      scatter=False,
+                      color=colors[err_type]["line"],
+                      ax=ax)
+        
+        # 设置标题和标签
+        title = f"{item['tag']}\nAverage KV Error vs Token Reuse Rate"
+        if not show_full_reuse:
+            title += " (Excluding 100% Reuse)"
+        ax.set_title(title)
+        ax.set_xlabel("Token Reuse Rate")
+        ax.set_ylabel("Average Error")
+        ax.grid(True, alpha=0.3)
+        
+        # 设置对数刻度
+        ax.set_yscale('log')
+        
+    # 如果数据集数量为奇数，删除多余的子图
+    if n_datasets % 2 == 1 and n_datasets > 1:
+        fig.delaxes(axes[n_rows-1, 1])
     
     plt.tight_layout()
     plt.savefig(f"examples/pipeline/images/kv_error_analysis{'_no_full_reuse' if not show_full_reuse else ''}.png", 
@@ -1061,6 +1113,19 @@ def analyze_low_correlation(data_path:str, save_path:str,device = "cuda:1", test
 
     if test_1 or test_2 or test_3:
         json.dump(new_data,open(save_path,"w"),indent=4,ensure_ascii=False)
+
+def plot_kverr_with_resue_segment_length(data_path:str,save_path:str):
+    """
+    统计token复用片段长度和KV缓存误差的关系
+    
+    """
+    data = json.load(open(data_path))
+    for pair in data:
+        reuse_segment_length = pair["reuse_segment_length"]
+        kverr = pair["kverr"]
+        plt.scatter(reuse_segment_length,kverr)
+    plt.savefig(save_path)
+    plt.close()
 
 def plot_analyze_low_correlation(test1_path, test2_path):
     """分析低相关性文本对在不同条件下的相关性变化
@@ -1206,9 +1271,9 @@ def find_high_low_sim_reuse(data_path:str,high_sim_low_reuse_path:str,low_sim_hi
     json.dump(high_sim_low_reuse,open(high_sim_low_reuse_path,"w"),indent=4,ensure_ascii=False)
     json.dump(low_sim_high_reuse,open(low_sim_high_reuse_path,"w"),indent=4,ensure_ascii=False)
 
-def slim_clean_data(data_path:str,save_path:str,threshold=0.95):
+def slim_clean_data(data_path:str,save_path:str,threshold=0.7):
     data = json.load(open(data_path))
-    
+    new_data = []
     high_sim_index = []
     low_sim_index = []
     for index,pair in tqdm(enumerate(data),desc="挑选"):
@@ -1216,47 +1281,54 @@ def slim_clean_data(data_path:str,save_path:str,threshold=0.95):
             high_sim_index.append(index)
         else:
             low_sim_index.append(index)
-    remained_high_sim_index = random.sample(high_sim_index,min(len(high_sim_index),len(low_sim_index)))   
-    remove_high_sim_index = [i for i in high_sim_index if i not in remained_high_sim_index]
-    # 根据remove_high_sim_index删除data中的数据
-    # 
-    for index in remove_high_sim_index:
-        del data[index]
-    print(f"保留{len(data)}条数据")
-    print(f"删除高相似度{len(remove_high_sim_index)}条数据")
+
+    max_remaind_num = 10000
     
-    json.dump(data,open(save_path,"w"),indent=4,ensure_ascii=False)
+    remained_high_sim_index = random.sample(high_sim_index,min(len(high_sim_index),max_remaind_num))   
+    remained_low_sim_index = random.sample(low_sim_index,min(len(low_sim_index),max_remaind_num))
+    for index in remained_high_sim_index:
+        new_data.append(data[index])
+    for index in remained_low_sim_index:
+        new_data.append(data[index])
+    
+    print(f"保留{len(new_data)}条数据")
+    # print(f"删除高相似度{len(remove_high_sim_index)}条数据")
+    
+    json.dump(new_data,open(save_path,"w"),indent=4,ensure_ascii=False)
             
 
-def remove_same_pairs(data_path:str,save_path:str,threshold=0.95):
-    data = json.load(open(data_path))
-    new_data = {
-        "high_quality_pairs":[],
-    }
-    # 先挑选出相似度超过0.95的超过,低于0.95的分成两组,低于了.95的全要,高于0.95的随机采样和低于0.95的组一样多
-    data = data["high_quality_pairs"]
-    high_sim_data = []
-    low_sim_data = []
-    for pair in tqdm(data,desc="挑选"):
-        if pair["cosine_similarity"] >= threshold:
-            high_sim_data.append(pair)
-        else:
-            low_sim_data.append(pair)
-    # 低于0.95的全部要
-    new_data["high_quality_pairs"].extend(low_sim_data)
-    # 高于0.95的随机采样和低于0.95的组一样多
-    high_sim_data = random.sample(high_sim_data,min(len(high_sim_data),len(low_sim_data)))
-    new_data["high_quality_pairs"].extend(high_sim_data)
-    print(f"保留{len(new_data['high_quality_pairs'])}条数据")
-    print(f"保留高相似度数据{len(high_sim_data)}条")
-    print(f"保留低相似度数据{len(low_sim_data)}条")
-    json.dump(new_data,open(save_path,"w"),indent=4,ensure_ascii=False)
-
+# def remove_same_pairs(data_path:str,save_path:str,threshold=0.95):
+#     data = json.load(open(data_path))
+#     new_data = {
+#         "high_quality_pairs":[],
+#     }
+#     # 先挑选出相似度超过0.95的超过,低于0.95的分成两组,低于了.95的全要,高于0.95的随机采样和低于0.95的组一样多
+#     data = data["high_quality_pairs"]
+#     high_sim_data = []
+#     low_sim_data = []
+#     for pair in tqdm(data,desc="挑选"):
+#         if pair["cosine_similarity"] >= threshold:
+#             high_sim_data.append(pair)
+#         else:
+#             low_sim_data.append(pair)
+#     # 低于0.95的全部要
+#     new_data["high_quality_pairs"].extend(low_sim_data)
+#     # 高于0.95的随机采样和低于0.95的组一样多
+#     high_sim_data = random.sample(high_sim_data,min(len(high_sim_data),len(low_sim_data)))
+#     new_data["high_quality_pairs"].extend(high_sim_data)
+#     print(f"保留{len(new_data['high_quality_pairs'])}条数据")
+#     print(f"保留高相似度数据{len(high_sim_data)}条")
+#     print(f"保留低相似度数据{len(low_sim_data)}条")
+#     json.dump(new_data,open(save_path,"w"),indent=4,ensure_ascii=False)
+    
 if __name__ == "__main__":
     pass
     # 设置环境变量
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    os.environ["MKL_THREADING_LAYER"] = "GNU"  # 强制使用 GNU 线程层
+    os.environ["MKL_SERVICE_FORCE_INTEL"] = "1"  # 可选：强制使用 Intel 线程
     
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     # raw_path = "examples/dataset/data/similar/instruction_wildv2/instruction_wildv2_batch_embeddings_clusters.json"
     # clean_path = "examples/dataset/data/similar/instruction_wildv2/instruction_wildv2_batch_embeddings_clusters_similar_pairs.json"
     # similar_path = "examples/dataset/data/similar/instruction_wildv2/instruction_wildv2_batch_embeddings_clusters_similar_pairs_cosine_similarity.json"
@@ -1269,9 +1341,9 @@ if __name__ == "__main__":
     # get_windowsize_similarity(sim_reuse_path,sim_reuse_path)
     # plot_similarity_reuse_rate(sim_reuse_path)
     # plot_window_size_reuse_rate(sim_reuse_path)
-    # select_high_correlation_pairs(sim_reuse_path,high_correlation_path,low_correlation_path,reuse_threshold=0.52,sim_threshold=0.49)
+    # select_high_correlation_pairs(sim_reuse_path,high_correlation_path,low_correlation_path)
     # compute_kverr_between_high_correlation(high_correlation_path,kverr_path)
-    # plot_kverr_distribution(kverr_path,show_full_reuse=False)
+   
     # high_sim_low_reuse_path = "examples/dataset/data/similar/instruction_wildv2/instruction_wildv2_batch_embeddings_clusters_similar_pairs_high_sim_low_reuse.json"
     # low_sim_high_reuse_path = "examples/dataset/data/similar/instruction_wildv2/instruction_wildv2_batch_embeddings_clusters_similar_pairs_low_sim_high_reuse.json"
     # find_high_low_sim_reuse(low_correlation_path,high_sim_low_reuse_path,low_sim_high_reuse_path)
@@ -1307,7 +1379,7 @@ if __name__ == "__main__":
     # select_similar_pairs(raw_path, clean_path)
     # compute_similarity(clean_path,similar_path)
     # get_windowsize_similarity(sim_reuse_path,sim_reuse_path)
-    # select_high_correlation_pairs(sim_reuse_path,high_correlation_path,low_correlation_path,reuse_threshold=0.3,sim_threshold=0.4)
+    # select_high_correlation_pairs(sim_reuse_path,high_correlation_path,low_correlation_path)
     # remove_same_pairs(high_correlation_path,high_correlation_remove_same_path)
     # compute_kverr_between_high_correlation(high_correlation_slim_path,kverr_path,device="cuda:0")
     
@@ -1321,63 +1393,91 @@ if __name__ == "__main__":
     # get_windowsize_similarity(similar_path,sim_reuse_path)
     
     
-    os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+    # os.environ["CUDA_VISIBLE_DEVICES"] = "1"
     # raw_path = "examples/dataset/data/similar/lmsys/lmsys_chat_1m_batch_embeddings_clusters.json"
     # clean_path = "examples/dataset/data/similar/lmsys/lmsys_chat_1m_batch_embeddings_clusters_similar_pairs.json"
     # similar_path = "examples/dataset/data/similar/lmsys/lmsys_chat_1m_batch_embeddings_clusters_similar_pairs_cosine_similarity.json"
-    sim_reuse_path = "examples/dataset/data/similar/lmsys/lmsys_chat_1m_batch_embeddings_clusters_similar_pairs_reuse_rate.json"
-    high_correlation_path = "examples/dataset/data/similar/lmsys/lmsys_chat_1m_batch_embeddings_clusters_similar_pairs_high_correlation.json"
-    low_correlation_path = "examples/dataset/data/similar/lmsys/lmsys_chat_1m_batch_embeddings_clusters_similar_pairs_low_correlation.json"
-    high_correlation_slim_path = "examples/dataset/data/similar/lmsys/lmsys_chat_1m_batch_embeddings_clusters_similar_pairs_high_correlation_slim.json"
-    kverr_path = "examples/dataset/data/similar/lmsys/lmsys_chat_1m_batch_embeddings_clusters_similar_pairs_high_correlation_kverr.json"
+    # sim_reuse_path = "examples/dataset/data/similar/lmsys/lmsys_chat_1m_batch_embeddings_clusters_similar_pairs_reuse_rate.json"
+    # high_correlation_path = "examples/dataset/data/similar/lmsys/lmsys_chat_1m_batch_embeddings_clusters_similar_pairs_high_correlation.json"
+    # low_correlation_path = "examples/dataset/data/similar/lmsys/lmsys_chat_1m_batch_embeddings_clusters_similar_pairs_low_correlation.json"
+    # high_correlation_slim_path = "examples/dataset/data/similar/lmsys/lmsys_chat_1m_batch_embeddings_clusters_similar_pairs_high_correlation_slim.json"
+    # kverr_path = "examples/dataset/data/similar/lmsys/lmsys_chat_1m_batch_embeddings_clusters_similar_pairs_high_correlation_kverr.json"
     # select_similar_pairs(raw_path, clean_path)
     # compute_similarity(clean_path,similar_path)
     # get_windowsize_similarity(similar_path,sim_reuse_path)
     # select_high_correlation_pairs(sim_reuse_path,high_correlation_path,low_correlation_path,reuse_threshold=0.44,sim_threshold=0.4)
     # remove_same_pairs(high_correlation_path,high_correlation_slim_path)
     
-    compute_kverr_between_high_correlation(high_correlation_slim_path,kverr_path,device="cuda:0")
+    # compute_kverr_between_high_correlation(high_correlation_slim_path,kverr_path,device="cuda:0")
     # raw_path = "examples/dataset/data/similar/wildchat/wild_chat_batch_embeddings_clusters.json"
     # clean_path = "examples/dataset/data/similar/wildchat/wild_chat_batch_embeddings_clusters_similar_pairs.json"
     # similar_path = "examples/dataset/data/similar/wildchat/wild_chat_batch_embeddings_clusters_similar_pairs_cosine_similarity.json"
     # silm_similarity_path = "examples/dataset/data/similar/wildchat/wild_chat_batch_embeddings_clusters_similar_pairs_cosine_similarity_slim.json"
     # sim_reuse_path = "examples/dataset/data/similar/wildchat/wild_chat_batch_embeddings_clusters_similar_pairs_reuse_rate.json"
+    # high_correlation_path = "examples/dataset/data/similar/wildchat/wild_chat_batch_embeddings_clusters_similar_pairs_high_correlation.json"
+    # low_correlation_path = "examples/dataset/data/similar/wildchat/wild_chat_batch_embeddings_clusters_similar_pairs_low_correlation.json"
     # # select_similar_pairs(raw_path, clean_path)
     # compute_similarity(clean_path,similar_path,device="cuda:0")
-    # slim_clean_data(similar_path,silm_similarity_path)
-    # get_windowsize_diff_and_reuse(similar_path,sim_reuse_path)
+    # slim_clean_data(similar_path,silm_similarity_path,threshold=0.8)
+    # get_windowsize_diff_and_reuse(silm_similarity_path,sim_reuse_path)
+    # select_high_correlation_pairs(sim_reuse_path,high_correlation_path,low_correlation_path)
     
     
-    data = [
-        {
-            "tag": "InstructionWild v2",
-            "path": "examples/dataset/data/similar/instruction_wildv2/instruction_wildv2_batch_embeddings_clusters_similar_pairs_reuse_rate.json",
-            "color": "blue",
-            "sim_threshold": 0.49,
-            "reuse_threshold": 0.52
-        },
-        {
-            "tag": "InstructionWild v2 GTE-Qwen2-7B",
-            "path": "examples/dataset/data/similar/instruction_wildv2/instruction_wildv2_batch_embeddings_clusters_similar_pairs_reuse_rate_gte_qwen2_7b.json",
-            "color": "green",
-            "sim_threshold": 0.780,
-            "reuse_threshold": 0.3
-        },
+    # data = [
+    #     {
+    #         "tag": "InstructionWild v2",
+    #         "path": "examples/dataset/data/similar/instruction_wildv2/instruction_wildv2_batch_embeddings_clusters_similar_pairs_reuse_rate.json",
+    #         "color": "blue",
+    #         "sim_threshold": 0.320,
+    #         "reuse_threshold": 0.606
+    #     },
+    #     # {
+    #     #     "tag": "InstructionWild v2 GTE-Qwen2-7B",
+    #     #     "path": "examples/dataset/data/similar/instruction_wildv2/instruction_wildv2_batch_embeddings_clusters_similar_pairs_reuse_rate_gte_qwen2_7b.json",
+    #     #     "color": "green",
+    #     #     "sim_threshold": 0.780,
+    #     #     "reuse_threshold": 0.3
+    #     # },
+    #     {
+    #         "tag": "WildChat-1M",
+    #         "path": "examples/dataset/data/similar/wildchat/wild_chat_batch_embeddings_clusters_similar_pairs_reuse_rate.json",
+    #         "color": "blue",
+    #         "sim_threshold": 0.667,
+    #         "reuse_threshold": 0.443
+    #     },
+        
+    #     {
+    #         "tag": "ShareGPT-90k",
+    #         "path": "examples/dataset/data/similar/sharegpt/sharegpt90k_batch_embeddings_clusters_similar_pairs_reuse_rate.json",
+    #         "color": "blue",
+    #         # "sim_threshold": 0.4,
+    #         # "reuse_threshold": 0.3,
+    #         "sim_threshold": 0.3,
+    #         "reuse_threshold": 0.535
+    #     },
+    #     {
+    #         "tag": "LMSysChat-1M",
+    #         "path": "examples/dataset/data/similar/lmsys/lmsys_chat_1m_batch_embeddings_clusters_similar_pairs_reuse_rate.json",
+    #         "color": "blue",
+    #         "sim_threshold": 0.4,
+    #         "reuse_threshold": 0.44
+    #     }
+    # ]
+    # plot_similarity_reuse_rate(data,save_path="examples/pipeline/images/similarity_reuse_rate.png")
+    
+    
+    kverr_data = [
         # {
-        #     "tag": "ShareGPT-90k",
-        #     "path": "examples/dataset/data/similar/sharegpt/sharegpt90k_batch_embeddings_clusters_similar_pairs_reuse_rate.json",
-        #     "color": "blue",
-        #     "sim_threshold": 0.4,
-        #     "reuse_threshold": 0.3,
-        #     "sim_threshold": 0.3,
-        #     "reuse_threshold": 0.535
+        #     "tag": "InstructionWild v2",
+        #     "path": "examples/dataset/data/similar/instruction_wildv2/instruction_wildv2_batch_embeddings_clusters_similar_pairs_high_correlation_kverr.json",
+        #     # "color": "blue"
         # },
-        # {
-        #     "tag": "LMSysChat-1M",
-        #     "path": "examples/dataset/data/similar/lmsys/lmsys_chat_1m_batch_embeddings_clusters_similar_pairs_reuse_rate.json",
-        #     "color": "blue",
-        #     "sim_threshold": 0.4,
-        #     "reuse_threshold": 0.44
-        # }
+        {
+            "tag": "ShareGPT-90k",
+            "path": "examples/dataset/data/similar/sharegpt/sharegpt90k_batch_embeddings_clusters_similar_pairs_high_correlation_kverr.json",
+            # "color": "blue"
+        },
+        
     ]
-    # plot_similarity_reuse_rate(data)
+    
+    plot_kverr_distribution(kverr_data,show_full_reuse=False)

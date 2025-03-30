@@ -3,7 +3,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 
 def calculate_nll(text, model, tokenizer):
     # 分词并转换为模型输入格式
-    inputs = tokenizer(text, return_tensors="pt", add_special_tokens=True)
+    inputs = tokenizer(text, return_tensors="pt", add_special_tokens=True).to(model.device)
     input_ids=inputs.input_ids
     # 获取模型的输出 logits
     with torch.no_grad():
@@ -23,15 +23,16 @@ def calculate_nll(text, model, tokenizer):
 
         # 累加负对数概率
         nll -= torch.log(token_prob).item()
-    print(f"NLL of '{text}': {nll:.2f}")
+    # print(f"NLL of '{text}': {nll:.2f}")
     return nll
 
-# 加载模型和分词器
-model_name = "Qwen/Qwen2.5-7B-Instruct"
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-model = AutoModelForCausalLM.from_pretrained(model_name)
+if __name__ == "__main__":
+    # 加载模型和分词器
+    model_name = "Qwen/Qwen2.5-7B-Instruct"
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForCausalLM.from_pretrained(model_name)
 
-# 示例句子
-calculate_nll( "I love China.", model, tokenizer)
-calculate_nll( "I love dog.", model, tokenizer)
-calculate_nll( "I love !!!.", model, tokenizer)
+    # 示例句子
+    calculate_nll( "I love China.", model, tokenizer)
+    calculate_nll( "I love dog.", model, tokenizer)
+    calculate_nll( "I love !!!.", model, tokenizer)
