@@ -317,21 +317,16 @@ def apply_change(source_tokens: list, target_tokens: list, source_kvcache: torch
     target_kvcache = torch.zeros([num_layer,2,len(target_tokens),dim],dtype=torch.bfloat16,device=device)
     
     reused_map_indices = []
+    expand_num = 0
     # 根据diff_report的moves信息，将source_kvcache中的token移动到target_kvcache中
     for move in diff_report['moves']:       
         source_start, source_end = move['from_position']
         target_start, target_end = move['to_position']
         target_kvcache[:,:,target_start:target_end+1,:] = source_kvcache[:,:,source_start:source_end+1,:]
-        # target_kvcache[:][:][target_start:target_end+1,:] = source_kvcache[:][:][source_start:source_end+1,:]
-          # 对每一层分别处理key和value
-        # for layer in range(num_layer):
-        #     # 复制key
-        #     target_kvcache[layer][0][target_start:target_end+1] = source_kvcache[layer][0][source_start:source_end+1]
-        #     # 复制value
-        #     target_kvcache[layer][1][target_start:target_end+1] = source_kvcache[layer][1][source_start:source_end+1]
             
-        reused_map_indices.extend(list(range(target_start,target_end+1)))
+        reused_map_indices.extend(list(range(max(0,target_start-expand_num),min(len(target_tokens),target_end+1+expand_num))))
     # 计算得到未复用kvcache的索引
+    
     unreused_map_indices = list(set(list(range(len(target_tokens)))) - set(reused_map_indices))
     
     return target_kvcache,reused_map_indices,unreused_map_indices

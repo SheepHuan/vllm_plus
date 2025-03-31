@@ -1,6 +1,6 @@
 import json
 from kvshare_new_pipeline import KVShareNewPipeline
-from nll_demo import calculate_nll
+from nll_demo import calculate_nll,calculate_ppl
 from vllm.sampling_params import SamplingParams
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM,AutoTokenizer
@@ -155,12 +155,45 @@ def plot_ppl(data_path: str):
     print(f"  - 平均值: {np.mean(modified_ppls):.3f}")
     print(f"  - 标准差: {np.std(modified_ppls):.3f}")
     print(f"  - 与相似度相关系数: {mod_corr:.3f}")
+
+
+def compute_ppl(data_path: str):
+    """
+    计算PPL
+    Args:
+        data_path: 数据文件路径
+    """
+    device = "cuda:0"
+    nll_model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-7B-Instruct").to(device).to(torch.bfloat16)
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct",local_files_only=True)
     
+    with open(data_path, "r") as f:
+        data = json.load(f)
+    # data = random.sample(json.load(open(input_path,"r")),100)
+    for idx,item in tqdm(enumerate(data),total=len(data)):
+        # if item["source_token_len"] > 3000 or item["target_token_len"] > 3000:
+        #     continue
+        try:
+            target_output_full_compute = item["llm_output"]["target_output_full_compute"]
+            target_output_partial_compute = item["llm_output"]["target_output_partial_compute"]
+            # sampling_params = SamplingParams(temperature=0, max_tokens=512)
+            
+            ppl_full_compute = calculate_ppl(target_output_full_compute,nll_model,tokenizer)
+            ppl_partial_compute = calculate_ppl(target_output_partial_compute,nll_model,tokenizer)
+            
+            item["llm_output"]["full_compute_ppl"] = ppl_full_compute
+            item["llm_output"]["partial_compute_ppl"] = ppl_partial_compute
+            
+        except Exception as e:
+            print(e)
+            continue
+    json.dump(data,open(data_path,"w"),indent=4,ensure_ascii=False)
         
 if __name__ == "__main__":  
-    os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     input_path = "examples/dataset/data/similar/sharegpt/sharegpt90k_batch_embeddings_clusters_similar_pairs_cosine_similarity_profiled.json"
     output_path = "examples/dataset/data/similar/sharegpt/sharegpt90k_batch_embeddings_clusters_similar_pairs_cosine_similarity_profiled_ppl_qwen2.5-7B.json"
-    sampled_data = generate_output_data(input_path, output_path)
+    # sampled_data = generate_output_data(input_path, output_path)
+    compute_ppl(output_path)
     # plot_ppl(output_path)
 

@@ -34,11 +34,11 @@ class DatasetEmbeder:
         self.client = MilvusClient(database_path)
         self.collection_name = collection_name
         
-        if self.client.has_collection(collection_name=collection_name):
-            self.client.drop_collection(collection_name=collection_name)
+        # if self.client.has_collection(collection_name=collection_name):
+        #     self.client.drop_collection(collection_name=collection_name)
         self.client.create_collection(
             collection_name=collection_name,
-            dimension=384,  # The vectors we will use in this demo has 768 dimensions
+            dimension=self.model.get_sentence_embedding_dimension(),  # The vectors we will use in this demo has 768 dimensions
         )
 
     def embed_text(self,text):
@@ -128,55 +128,37 @@ def find_the_most_similar_and_max_resued_docs(dataset_path,save_path):
     all_documents = data["all_documents"]
     similar_docs = data["similar_docs"]
     # 对similar_docs进行排序
-  
-    
+    # similar_docs = random.sample(similar_docs,min(len(similar_docs),500))
+    save_data =[]
     for item in tqdm(similar_docs):
         item["similar_docs"] = sorted(item["similar_docs"],key=lambda x: x["similarity"],reverse=True)
         target_tokens = tokenizer.encode(item["document"])
-        max_resued_token_num = 0
-        max_resued_doc_id = -1
+        new_similar_docs = []
         for similar_doc in item["similar_docs"]:
-            if similar_doc["similarity"] > 0.9999:
-                continue
+            # if similar_doc["similarity"] > 0.99999:
+            #     continue
             source_tokens = tokenizer.encode(all_documents[str(similar_doc["id"])]["document"])
             if len(source_tokens) < 10 or len(target_tokens) < 10:
                 continue
             diff_report = find_text_differences(source_tokens,target_tokens)
-            resued_token_num =0
+            reused_token_num = 0
             for move in diff_report["moves"]:
-                resued_token_num += len(move["to_position"])
-            if resued_token_num > max_resued_token_num:
-                max_resued_token_num = resued_token_num
-                max_resued_doc_id = similar_doc["id"]
-        # if max_resued_doc_id is not None:
-        item["max_resued_doc_id"] = max_resued_doc_id
-        item["max_resued_token_num"] = max_resued_token_num
-    json.dump(data,open(save_path,"w"),indent=4,ensure_ascii=False)
+                reused_token_num += len(move["to_position"])
+            similar_doc["reused_token_num"] = reused_token_num
+            similar_doc["id"] = similar_doc["id"]
+            new_similar_docs.append(similar_doc)
+            
+    
+        item["cosine_similarity_top5"] = sorted(new_similar_docs,key=lambda x: x["similarity"],reverse=True)[:5]
+        item["reused_token_num_top5"] = sorted(new_similar_docs,key=lambda x: x["reused_token_num"],reverse=True)[:5]
+        
+        save_data.append(item)
+    json.dump({
+        "all_documents": all_documents,
+        "similar_docs": save_data
+    },open(save_path,"w"),indent=4,ensure_ascii=False)
 
-def select_xsum_dataset(dataset_path,save_path):
-    data = json.load(open(dataset_path,"r"))
-    all_documents = data["all_documents"]
-    similar_docs = data["similar_docs"]
-    
-    save_data = {
-        "all_documents":all_documents,
-        "similar_docs":[]
-    }
-    
-    for item in tqdm(similar_docs):
-        item["similar_docs"] = sorted(item["similar_docs"],key=lambda x: x["similarity"],reverse=True)
-        if item["similar_docs"][1]["similarity"]<=0.7:
-            continue
-        new_item = {
-            "document":item["document"],
-            "summary":item["summary"],
-            "high_similarity_doc":item["similar_docs"][1],
-            "max_resued_doc":item["max_resued_doc_id"],
-            "max_resued_token_num":item["max_resued_token_num"]
-        }
-        save_data["similar_docs"].append(new_item)
-    json.dump(save_data,open(save_path,"w"),indent=4,ensure_ascii=False)
-    print(f"select {len(save_data['similar_docs'])} items from {len(similar_docs)} items")
+
 
 if __name__ == "__main__":
 
@@ -187,12 +169,12 @@ if __name__ == "__main__":
     dataset_path = "EdinburghNLP/xsum"
     database_path = "examples/dataset/data/database/milvus_xsum.db"
     save_path = f"examples/dataset/data/xsum/{model_name}_train_similar_docs_topk50.json"
-    save_path_high_sim = f"examples/dataset/data/xsum/{model_name}_train_similar_docs_topk50_high_similarity.json"
+    save_path_high_sim = f"examples/dataset/data/xsum/{model_name}_train_similar_docs_topk50_test3.json"
     # embedding_xsum_dataset(model_name="all-MiniLM-L6-v2",dataset_path="EdinburghNLP/xsum",tag="train",global_id=0)
     # embedding_xsum_dataset(model_name="all-MiniLM-L6-v2",dataset_path="EdinburghNLP/xsum",tag="test",global_id=2100000)                                                     
     # embedding_xsum_dataset(model_name="all-MiniLM-L6-v2",dataset_path="EdinburghNLP/xsum",tag="validation",global_id=2111400)
     # find_xsum_similar_docs(model_name=model_name,dataset_path=dataset_path,database_path=database_path,save_path=save_path)
-    # find_the_most_similar_and_max_resued_docs(dataset_path=save_path,save_path=save_path)
-    select_xsum_dataset(dataset_path=save_path,save_path=save_path_high_sim)
+    find_the_most_similar_and_max_resued_docs(dataset_path=save_path,save_path=save_path_high_sim)
+    # select_xsum_dataset(dataset_path=save_path,save_path=save_path_high_sim)
     
     

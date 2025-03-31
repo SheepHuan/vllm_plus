@@ -90,31 +90,56 @@ def combine_wmt_dataset(input_path: str="examples/dataset/data/wmt_dataset_long.
         })
     
     json.dump(bench_dataset, open(output_path, "w"), ensure_ascii=False, indent=4)
-    
-    
-def embed_wmt_dataset(model_name,dataset_path,database_path,collection_name,global_id=0,config="zh-en"):
-    dataset_embeder = DatasetEmbeder(model_name,collection_name=collection_name,database_path=database_path)
-    # train_dataset = list(datasets.load_dataset(dataset_path,config,split="train"))
+
+def merge_wmt_dataset(save_path: str="examples/dataset/data/wmt_dataset_long.json",
+                      config: str="zh-en",
+                      dataset_path: str="wmt/wmt19"):
+    tokenizer = transformers.AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
     validation_dataset = list(datasets.load_dataset(dataset_path,config,split="validation"))
     train_dataset = list(datasets.load_dataset(dataset_path,config,split="train"))
     dataset = validation_dataset + train_dataset
-    for item in tqdm(dataset):
+    global_id = 0
+    save_data = []
+    for item in dataset:
+        source_text = item["translation"][config.split("-")[0]]
+        target_text = item["translation"][config.split("-")[1]]
+        source_token_ids = tokenizer.encode(source_text, add_special_tokens=False)
+        target_token_ids = tokenizer.encode(target_text, add_special_tokens=False)
+        if len(source_token_ids) < 50:
+            continue
+        # data["length"] = len(source_token_ids)
+        global_id += 1
+        data = {
+            "id": global_id,
+            "translation": item["translation"],
+        }
+        save_data.append(data)
+    json.dump(save_data, open(save_path, "w"), ensure_ascii=False, indent=4)        
+    
+    
+    
+def embed_wmt_dataset(model_name,dataset_path,database_path,collection_name,global_id=0,config="zh-en",batch_size=64):
+    dataset = json.load(open(dataset_path, "r"))
+    dataset_embeder = DatasetEmbeder(model_name,collection_name=collection_name,database_path=database_path)
+    
+    
+    for i in tqdm(range(0,len(dataset),batch_size),desc=f"embedding {config} dataset"):
         try:
-            global_id += 1
-            document = item["translation"][config.split("-")[0]]
-            embeddings = dataset_embeder.embed_text(document)
-            data = {
-                "id": global_id,
-                "vector":embeddings,
-                "translation": item["translation"],
-            }
-            dataset_embeder.insert_dataset(data)
-            print(data)
+            items = dataset[i:i+batch_size]
+            source_texts = []
+            target_texts = []
+            for item in items:
+                source_texts.append(item["translation"][config.split("-")[0]])
+                target_texts.append(item["translation"][config.split("-")[1]])
+            embeddings = dataset_embeder.embed_text(source_texts)
+            datas = [{"id":global_id+j,"vector":embeddings[j],"translation":items[j]["translation"]} for j in range(len(items))]
+            dataset_embeder.insert_dataset(datas)
+            global_id += len(items)
         except Exception as e:
             print(e)
             continue
     print(f"embedding {config} dataset done,max id is {global_id}")    
-    # print(f"embedding {tag} dataset done,max id is {global_id}")    
+  
             
 if __name__ == "__main__":
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
@@ -122,6 +147,12 @@ if __name__ == "__main__":
     database_path = "examples/dataset/data/database/milvus_wmt19.db"
     collection_name = "wmt19"
     model_name = "all-MiniLM-L6-v2"
+    # model_name = "BAAI/bge-m3"
     config = "zh-en"
+    
+    # merge_wmt_dataset(save_path=f"examples/dataset/data/wmt19/wmt19_dataset_zh-en.json",
+    #                   config="zh-en")
+    # merge_wmt_dataset(save_path=f"examples/dataset/data/wmt19/wmt19_dataset_gu-en.json",
+    #                   config="gu-en")
     embed_wmt_dataset(model_name=model_name,dataset_path=dataset_path,database_path=database_path,collection_name=collection_name,global_id=0,config=config)
 
