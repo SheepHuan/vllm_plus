@@ -316,6 +316,8 @@ def apply_change(source_tokens: list, target_tokens: list, source_kvcache: torch
     device = source_kvcache[0][0].device
     target_kvcache = torch.zeros([num_layer,2,len(target_tokens),dim],dtype=torch.bfloat16,device=device)
     
+    expand_token_num = 0
+    
     reused_map_indices = []
     # 根据diff_report的moves信息，将source_kvcache中的token移动到target_kvcache中
     for move in diff_report['moves']:       
@@ -330,8 +332,8 @@ def apply_change(source_tokens: list, target_tokens: list, source_kvcache: torch
         #     # 复制value
         #     target_kvcache[layer][1][target_start:target_end+1] = source_kvcache[layer][1][source_start:source_end+1]
             
-        reused_map_indices.extend(list(range(target_start,target_end+1)))
-    # 计算得到未复用kvcache的索引
+        reused_map_indices.extend(list(range(max(0,target_start-expand_token_num),min(len(target_tokens),target_end+1+expand_token_num))))
+    # 计算得到未复用kvcache的索引   
     unreused_map_indices = list(set(list(range(len(target_tokens)))) - set(reused_map_indices))
     
     return target_kvcache,reused_map_indices,unreused_map_indices

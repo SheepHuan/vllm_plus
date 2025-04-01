@@ -122,7 +122,6 @@ def embed_wmt_dataset(model_name,dataset_path,database_path,collection_name,glob
     dataset = json.load(open(dataset_path, "r"))
     dataset_embeder = DatasetEmbeder(model_name,collection_name=collection_name,database_path=database_path)
     
-    
     for i in tqdm(range(0,len(dataset),batch_size),desc=f"embedding {config} dataset"):
         try:
             items = dataset[i:i+batch_size]
@@ -139,8 +138,55 @@ def embed_wmt_dataset(model_name,dataset_path,database_path,collection_name,glob
             print(e)
             continue
     print(f"embedding {config} dataset done,max id is {global_id}")    
-  
-            
+
+def find_wmt_similar_docs(dataset_path: str,save_path: str):
+    from edit2 import find_text_differences
+    from sentence_transformers import SentenceTransformer
+    from pymilvus import MilvusClient
+    dataset = json.load(open(dataset_path, "r"))
+    tokenizer = transformers.AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
+    model = SentenceTransformer("all-MiniLM-L6-v2")
+    client = MilvusClient("/root/code/vllm_plus/examples/dataset/data/database/milvus_wmt19.db")
+    collection_name = "wmt19"
+    save_data = {
+        "all_data": {},
+        "similar_pairs": []
+    }
+    
+    for item in dataset:
+        id = item["id"]
+        translation = item["translation"]
+        embeddings = model.encode(translation["zh"])
+        save_data["all_data"][id] = translation
+        results = client.search(collection_name=collection_name,data=[embeddings],limit=50,output_fields=["translation"])
+        if len(results[0]) > 0:
+            tmp_item = {
+                "id": id,
+                "translation": translation,
+                "similar_items": []
+            }
+            for result in results[0]:
+                
+                reused_token_num = 0
+                source_tokens = tokenizer.encode(result["entity"]["translation"]["zh"])
+                target_tokens = tokenizer.encode(translation["zh"])
+                diff_report = find_text_differences(source_tokens,target_tokens)
+                for move in diff_report["moves"]:
+                    reused_token_num += len(move["to_position"])
+                tmp_item["similar_items"].append({
+                    "id": result["id"],
+                    "similarity": result["distance"],
+                    "reused_token_num": reused_token_num
+                })
+            new_item = {
+                "id": item["id"],
+                "cosine_similarity_top5": sorted(tmp_item["similar_items"],key=lambda x: x["similarity"],reverse=True)[1:6],
+                "reused_token_num_top5": sorted(tmp_item["similar_items"],key=lambda x: x["reused_token_num"],reverse=True)[1:6]
+            }
+            save_data["similar_pairs"].append(new_item)
+        
+    json.dump(dataset, open(save_path, "w"), ensure_ascii=False, indent=4)
+    
 if __name__ == "__main__":
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     dataset_path = "wmt/wmt19"
@@ -154,5 +200,7 @@ if __name__ == "__main__":
     #                   config="zh-en")
     # merge_wmt_dataset(save_path=f"examples/dataset/data/wmt19/wmt19_dataset_gu-en.json",
     #                   config="gu-en")
-    embed_wmt_dataset(model_name=model_name,dataset_path=dataset_path,database_path=database_path,collection_name=collection_name,global_id=0,config=config)
-
+    # embed_wmt_dataset(model_name=model_name,dataset_path=dataset_path,database_path=database_path,collection_name=collection_name,global_id=0,config=config)
+    
+    find_wmt_similar_docs(dataset_path=f"examples/dataset/data/wmt19/wmt19_dataset_zh-en.json",
+                          save_path=f"examples/dataset/data/wmt19/wmt19_dataset_zh-en_similar_docs.json")

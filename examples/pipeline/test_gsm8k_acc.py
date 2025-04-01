@@ -164,8 +164,115 @@ Question: {question}.\nLet's think step by step<|im_end|>\n<|im_start|>assistant
             continue
         
     json.dump(save_data,open(output_path,"w"),indent=4,ensure_ascii=False)
+
+def plot_acc_comparison(input_path: str, save_path: str = "examples/pipeline/images/gsm8k_acc_comparison.png"):
+    """对比全量计算、相似度top1和重用token top1的准确率分布"""
+    with open(input_path, "r") as f:
+        data = json.load(f)
     
+    # 收集三种方法的准确率
+    full_compute_acc = []
+    similarity_top1_acc = []
+    reused_token_top1_acc = []
     
+    for item in data:
+        try:
+            # 全量计算的准确率
+            full_compute_acc.append(float(item["is_correct"]))
+            
+            # 相似度top1的准确率
+            if item["cosine_similarity_top5"] and len(item["cosine_similarity_top5"]) > 0:
+                similarity_top1_acc.append(float(item["cosine_similarity_top5"][0]["is_correct"]))
+            
+            # 重用token top1的准确率
+            if item["reused_token_num_top5"] and len(item["reused_token_num_top5"]) > 0:
+                reused_token_top1_acc.append(float(item["reused_token_num_top5"][0]["is_correct"]))
+        except Exception as e:
+            continue
+    
+    # 定义统一的颜色方案
+    colors = {
+        'Full Compute': '#1f77b4',      # 蓝色
+        'Similarity Top1': '#2ca02c',    # 绿色
+        'Reused Token Top1': '#ff7f0e'   # 橙色
+    }
+    labels = list(colors.keys())
+    
+    # 创建子图
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+    
+    # 1. 箱线图比较
+    data_to_plot = [full_compute_acc, similarity_top1_acc, reused_token_top1_acc]
+    
+    bp = ax1.boxplot(data_to_plot, labels=labels, patch_artist=True)
+    
+    # 设置箱线图颜色
+    for patch, label in zip(bp['boxes'], labels):
+        patch.set_facecolor(colors[label])
+        patch.set_alpha(0.6)
+    
+    # 添加数据点
+    for i, (data_points, label) in enumerate(zip(data_to_plot, labels), 1):
+        ax1.scatter([i] * len(data_points), data_points, 
+                   alpha=0.3, color=colors[label], s=20)
+    
+    ax1.set_ylabel('Accuracy')
+    ax1.set_title('Accuracy Distribution Comparison')
+    ax1.grid(True, alpha=0.3)
+    
+    # 2. 密度分布图
+    for scores, label in zip(data_to_plot, labels):
+        sns.kdeplot(data=scores, 
+                   label=label, 
+                   ax=ax2, 
+                   color=colors[label],
+                   fill=True, 
+                   alpha=0.3)
+    
+    ax2.set_xlabel('Accuracy')
+    ax2.set_ylabel('Density')
+    ax2.set_title('Accuracy Density Distribution')
+    ax2.grid(True, alpha=0.3)
+    ax2.legend()
+    
+    # 添加统计信息
+    stats_text = (
+        f"Statistics:\n"
+        f"Full Compute: {np.mean(full_compute_acc):.4f} ± {np.std(full_compute_acc):.4f} (N={len(full_compute_acc)})\n"
+        f"Similarity Top1: {np.mean(similarity_top1_acc):.4f} ± {np.std(similarity_top1_acc):.4f} (N={len(similarity_top1_acc)})\n"
+        f"Reused Token Top1: {np.mean(reused_token_top1_acc):.4f} ± {np.std(reused_token_top1_acc):.4f} (N={len(reused_token_top1_acc)})"
+    )
+    
+    plt.figtext(0.02, 0.02, stats_text, fontsize=10, 
+                bbox=dict(facecolor='white', alpha=0.8))
+    
+    # 调整布局并保存
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    plt.close()
+    
+    # 打印详细统计信息
+    print("\n准确率统计:")
+    print("-" * 50)
+    print(f"全量计算:")
+    print(f"  样本数量: {len(full_compute_acc)}")
+    print(f"  平均准确率: {np.mean(full_compute_acc):.4f} ± {np.std(full_compute_acc):.4f}")
+    print(f"  中位数: {np.median(full_compute_acc):.4f}")
+    print(f"  范围: [{np.min(full_compute_acc):.4f}, {np.max(full_compute_acc):.4f}]")
+    
+    print(f"\n相似度Top1:")
+    print(f"  样本数量: {len(similarity_top1_acc)}")
+    print(f"  平均准确率: {np.mean(similarity_top1_acc):.4f} ± {np.std(similarity_top1_acc):.4f}")
+    print(f"  中位数: {np.median(similarity_top1_acc):.4f}")
+    print(f"  范围: [{np.min(similarity_top1_acc):.4f}, {np.max(similarity_top1_acc):.4f}]")
+    
+    print(f"\n重用Token Top1:")
+    print(f"  样本数量: {len(reused_token_top1_acc)}")
+    print(f"  平均准确率: {np.mean(reused_token_top1_acc):.4f} ± {np.std(reused_token_top1_acc):.4f}")
+    print(f"  中位数: {np.median(reused_token_top1_acc):.4f}")
+    print(f"  范围: [{np.min(reused_token_top1_acc):.4f}, {np.max(reused_token_top1_acc):.4f}]")
+
 if __name__ == "__main__":
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-    generate_output_data(input_path="examples/dataset/data/gsm8k/gsm8k_dataset_similar_docs_top5.json",output_path="examples/dataset/data/gsm8k/gsm8k_dataset_similar_docs_top5_output.json")
+    # generate_output_data(input_path="examples/dataset/data/gsm8k/gsm8k_dataset_similar_docs_top5.json",output_path="examples/dataset/data/gsm8k/gsm8k_dataset_similar_docs_top5_output.json")
+    plot_acc_comparison(input_path="examples/dataset/data/gsm8k/gsm8k_dataset_similar_docs_top5_output.json")

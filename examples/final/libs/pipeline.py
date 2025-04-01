@@ -1,4 +1,4 @@
-from edit2 import find_text_differences, apply_change
+from .edit import KVEditor
 from vllm import LLM
 from vllm.entrypoints.llm import SamplingParams,RequestOutput
 from typing import List
@@ -26,7 +26,6 @@ class KVShareNewPipeline:
                         disable_async_output_proc=True
                     )
         tokenizer = AutoTokenizer.from_pretrained(model_name,local_files_only=True)
-
     
     @staticmethod
     def get_kvcache_by_full_compute(model:LLM,sampling_params:SamplingParams, prompt:str,device:str="cuda:0"):
@@ -46,18 +45,18 @@ class KVShareNewPipeline:
             hack_kv = llm_layers[j].self_attn.hack_kv
             temp_key_cache = hack_kv[0].clone().to(device)
             temp_value_cache = hack_kv[1].clone().to(device)
-            past_key_values.append(torch.stack([temp_key_cache,temp_value_cache],dim=0))
+            past_key_values.append(torch.stack([temp_key_cache,temp_value_cache],dim=0))    
         past_key_values = torch.stack(past_key_values,dim=0)
         
-        return past_key_values,output[0].prompt_token_ids
+        return past_key_values,output
         
     @staticmethod
     def find_texts_differences(source_token_ids:List[int],target_token_ids:List[int]):
-        return find_text_differences(source_token_ids,target_token_ids)
+        return KVEditor.find_text_differences(source_token_ids,target_token_ids)
 
     @staticmethod
-    def apply_changes2kvcache(source_token_ids:List[int],target_token_ids:List[int],source_kvcache:torch.Tensor,diff_report):
-        return apply_change(source_token_ids,target_token_ids,source_kvcache,diff_report)
+    def apply_changes2kvcache(target_token_ids:List[int],source_kvcache:torch.Tensor,diff_report):
+        return KVEditor.apply_change(target_token_ids,source_kvcache,diff_report)
 
     @staticmethod
     def full_compute(llm_model,sampling_params:SamplingParams,prompt:str):
@@ -76,21 +75,39 @@ class KVShareNewPipeline:
         ttft_time = output[0].metrics.first_token_time-output[0].metrics.first_scheduled_time
         return output[0].outputs[0].text,output[0].prompt_token_ids,ttft_time
     
+    
     @staticmethod
-    def partial_compute(llm_model:LLM,sampling_params:SamplingParams,text:str,reused_map_indices:List[int],unused_map_indices:List[int],reused_kvcache,device="cuda:0"):
+    def batch_full_compute(llm_model,sampling_params:SamplingParams,prompt:List[str]) -> List[RequestOutput]:
+        llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["check"] = False
+        llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata['collect'] = False
+        llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["use_additional_indices"] = False
+        llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["additional_map_indices"] = None
+        llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["old_kv_map_indices"] = None
+        llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["imp_indices"] = None
+        # sampling_params = SamplingParams(temperature=0, max_tokens=1)
+      
+      
+        llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["check"] = False
+        llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata['collect'] = False
+        outputs = llm_model.generate(prompt,sampling_params,use_tqdm=False)
+        return outputs
+    
+    
+    @staticmethod
+    def partial_compute(llm_model:LLM,sampling_params:SamplingParams,text:List[str],reused_map_indices:List[int],unused_map_indices:List[int],selected_token_indices:List[int],reused_kvcache,device="cuda:0") -> List[RequestOutput]:
         additional_map_indices = torch.tensor(unused_map_indices).to(device).to(torch.int64)
         old_kv_map_indices = torch.tensor(reused_map_indices).to(device).to(torch.int64)
-        # sampling_params = SamplingParams(max_tokens=1)
-      
+
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["check"] = True
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata['collect'] = False
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["recomp_ratio"] = 0.0
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["use_additional_indices"] = True
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["additional_map_indices"] = additional_map_indices
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["old_kv_map_indices"] = old_kv_map_indices
+        llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["selected_token_indices"] = selected_token_indices
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.old_kvs = reused_kvcache
-        output = llm_model.generate(text,sampling_params,use_tqdm=False)
-        ttft_time = output[0].metrics.first_token_time-output[0].metrics.first_scheduled_time
-        return output[0].outputs[0].text,output[0].prompt_token_ids,ttft_time
+        outputs = llm_model.generate(text,sampling_params,use_tqdm=False)
+        # ttft_time = outputs[0].metrics.first_token_time-outputs[0].metrics.first_scheduled_time
+        return outputs
     
     

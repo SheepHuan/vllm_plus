@@ -115,80 +115,109 @@ def embed_opus_dataset(dataset_path: str, config: str, batch_size: int = 32):
     
     print(f"Processed {global_id} documents in total")
 
-def find_opus_similar_docs(dataset_path: str, save_path: str):
-    dataset = json.load(open(dataset_path, "r"))
-    client = MilvusClient("/root/code/vllm_plus/examples/dataset/data/database/opus.db")
-    collection_name = "opus"
-    model = SentenceTransformer("all-MiniLM-L6-v2",device="cuda:0")
-    save_data = {
-        "all_translations": {},
-        "similar_pairs": {}
-    }
-    # dataset = random.sample(dataset,min(len(dataset),500))
-    for item in tqdm(dataset):
-        source_text = item["translation"][config.split("-")[0]]
-        embeddings = model.encode(source_text)
-        results = client.search(collection_name=collection_name,data=[embeddings],limit=50,output_fields=["translation"])
-        if len(results[0]) > 0:
-            saved_item = {
-                "id": item["id"],
-                "similar_items": []
-            }
-            if item["id"] not in save_data["all_translations"]:
-                save_data["all_translations"][item["id"]] = item["translation"]
-            for result in results[0]:
-                saved_item["similar_items"].append({
-                    "id": result["id"],
-                    "similarity": result["distance"],
-                })
-                if result["id"] not in save_data["all_translations"]:
-                    save_data["all_translations"][result["id"]] = result["entity"]["translation"]
-            save_data["similar_pairs"][item["id"]] = saved_item
-    json.dump(save_data, open(save_path, "w"), ensure_ascii=False, indent=4)
+def find_opus_similar_docs(dataset_path: str, save_path: str, config: str):
+    """查找相似文档并计算重用token数，一次完成相似度搜索和token重用分析
     
-def find_opus_similar_docs_topk(dataset_path: str, save_path: str):
-    dataset = json.load(open(dataset_path, "r"))
+    Args:
+        dataset_path: 数据集路径
+        save_path: 保存路径
+        config: 语言配置，如 "en-zh"
+    """
     from edit2 import find_text_differences
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct",local_files_only=True)
-    data = json.load(open(dataset_path,"r"))
-    all_translations = data["all_translations"]
-    similar_pairs = data["similar_pairs"]
-    save_data = []
-    # similar_pairs = random.sample(similar_pairs,min(len(similar_pairs),500))
-    for id,item in tqdm(similar_pairs.items()):
-        save_items = []
-        for similar_item in item["similar_items"]:
-            source_tokens = tokenizer.encode(all_translations[str(similar_item["id"])]["en"])
-            target_tokens = tokenizer.encode(all_translations[str(item["id"])]["en"])
-            diff_report = find_text_differences(source_tokens,target_tokens)
-            reused_token_num = 0
-            for move in diff_report["moves"]:
-                reused_token_num += len(move["to_position"])
-            similar_item["reused_token_num"] = reused_token_num
-            save_items.append(similar_item)
-
-        # 选择similarity top5保存
-        new_item = {
-            "id": id,
-            "cosine_similarity_top5": sorted(save_items,key=lambda x: x["similarity"],reverse=True)[1:6],
-            "reused_token_num_top5": sorted(save_items,key=lambda x: x["reused_token_num"],reverse=True)[1:6]
-        }
-        save_data.append(new_item)
+    
+    # 初始化必要的组件
+    source_documents = json.load(open(dataset_path, "r"))
+    vector_db = MilvusClient("/root/code/vllm_plus/examples/dataset/data/database/opus.db")
+    embedding_model = SentenceTransformer("all-MiniLM-L6-v2", device="cuda:0")
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct", local_files_only=True)
+    
+    # 定义源语言和目标语言
+    source_lang = config.split("-")[0]
+    target_lang = config.split("-")[1]
+    
+    result_data = {
+        "all_translations": {},  # 存储所有文档的翻译
+        "similar_pairs": []     # 存储相似文档对
+    }
+    
+    for source_doc in tqdm(source_documents, desc="Processing documents"):
+        try:
+            # 1. 获取源文本并计算embedding
+            source_text = source_doc["translation"][source_lang]
+            text_embedding = embedding_model.encode(source_text)
+            
+            # 2. 在向量数据库中搜索相似文档
+            search_results = vector_db.search(
+                collection_name="opus",
+                data=[text_embedding],
+                limit=50,
+                output_fields=["translation"]
+            )
+            
+            if len(search_results[0]) == 0:
+                continue
+                
+            # 3. 保存原始文档的翻译
+            source_doc_id = source_doc["id"]
+            if source_doc_id not in result_data["all_translations"]:
+                result_data["all_translations"][source_doc_id] = source_doc["translation"]
+            
+            # 4. 处理相似文档
+            similar_docs = []
+            source_target_tokens = tokenizer.encode(source_doc["translation"][target_lang])
+            
+            for candidate in search_results[0]:
+                candidate_id = candidate["id"]
+                # 跳过自身
+                if candidate_id == source_doc_id:
+                    continue
+                    
+                # 保存相似文档的翻译
+                if candidate_id not in result_data["all_translations"]:
+                    result_data["all_translations"][candidate_id] = candidate["entity"]["translation"]
+                
+                # 计算token重用数量
+                candidate_tokens = tokenizer.encode(candidate["entity"]["translation"][target_lang])
+                diff_report = find_text_differences(candidate_tokens, source_target_tokens)
+                reused_tokens = sum(len(move["to_position"]) for move in diff_report["moves"])
+                
+                # 保存相似度和重用token信息
+                similar_docs.append({
+                    "id": candidate_id,
+                    "similarity": candidate["distance"],
+                    "reused_token_num": reused_tokens
+                })
+            
+            # 5. 选择top5并保存
+            if similar_docs:
+                doc_pair = {
+                    "id": source_doc_id,
+                    "cosine_similarity_top5": sorted(similar_docs, 
+                                                   key=lambda x: x["similarity"], 
+                                                   reverse=True)[:5],
+                    "reused_token_num_top5": sorted(similar_docs, 
+                                                  key=lambda x: x["reused_token_num"], 
+                                                  reverse=True)[:5]
+                }
+                result_data["similar_pairs"].append(doc_pair)
+                
+        except Exception as e:
+            print(f"Error processing document {source_doc['id']}: {e}")
+            continue
         
-    json.dump({
-        "all_translations": all_translations,
-        "similar_pairs": save_data
-    }, open(save_path, "w"), ensure_ascii=False, indent=4)
+        # # 定期保存结果
+        # if len(result_data["similar_pairs"]) % 100 == 0:
+        #     json.dump(result_data, open(save_path, "w"), ensure_ascii=False, indent=4)
     
-    
+    # 最终保存
+    json.dump(result_data, open(save_path, "w"), ensure_ascii=False, indent=4)
+    print(f"Successfully processed {len(result_data['similar_pairs'])} documents")
+
 if __name__ == "__main__":
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     config = "en-zh"
     dataset_path = f"examples/dataset/data/opus/opus_dataset_{config}.json"
-    # process_opus_dataset(save_path=dataset_path, config=config)
-    # embed_opus_dataset(dataset_path=dataset_path, config=config, batch_size=64)
-    
-    similar_path = f"examples/dataset/data/opus/opus_dataset_{config}_similar_docs_top50.json"
-    save_path = f"examples/dataset/data/opus/opus_dataset_{config}_similar_docs_top50_test1.json"
-    # find_opus_similar_docs(dataset_path=dataset_path, save_path=save_path)
-    find_opus_similar_docs_topk(dataset_path=similar_path, save_path=save_path)
+    save_path = f"examples/dataset/data/opus/opus_dataset_{config}_similar_docs_250331.json"
+    #process_opus_dataset(save_path,config)
+    #embed_opus_dataset(dataset_path: str, config: str, batch_size: int = 32)
+    find_opus_similar_docs(dataset_path=dataset_path, save_path=save_path, config=config)

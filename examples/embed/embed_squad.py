@@ -102,7 +102,7 @@ def find_squad_similar_docs(dataset_path,save_path):
     for item in tqdm(dataset):
         source_text = item["context"]+"\n"+item["question"]
         embeddings = model.encode(source_text)
-        results = client.search(collection_name=collection_name,data=[embeddings],limit=50,output_fields=["question","answer"])
+        results = client.search(collection_name=collection_name,data=[embeddings],limit=50,output_fields=["question","answer","context"])
         if len(results[0]) > 0:
             saved_item = {
                 "id": item["id"],
@@ -117,8 +117,8 @@ def find_squad_similar_docs(dataset_path,save_path):
                 
                 for move in diff_report["moves"]:
                     reused_token_num += len(move["to_position"])
-                for move in diff_report["moves"]:
-                    reused_token_num += len(move["to_position"])
+                # for move in diff_report["moves"]:
+                #     reused_token_num += len(move["to_position"])
                 saved_item["similar_items"].append({
                     "id": result["id"],
                     "similarity": result["distance"],
@@ -147,11 +147,9 @@ def find_squad_similar_docs(dataset_path,save_path):
     json.dump(save_data, open(save_path, "w"), ensure_ascii=False, indent=4)
 
 if __name__ == "__main__":
-    # process_gsm8k_dataset(save_path="examples/dataset/data/gsm8k/gsm8k_dataset.json")
-    # embed_gsm8k_dataset(dataset_path="examples/dataset/data/gsm8k/gsm8k_dataset.json")
-    process_squad_dataset(save_path="examples/dataset/data/squad/squad_dataset.json")
+    # process_squad_dataset(save_path="examples/dataset/data/squad/squad_dataset.json")
     # embed_squad_dataset(dataset_path="examples/dataset/data/squad/squad_dataset.json")
     
-    # dataset_path = "examples/dataset/data/squad/squad_dataset.json"
-    # save_path = "examples/dataset/data/squad/squad_dataset_similar_docs_top5.json"
-    # find_gsm8k_similar_docs(dataset_path=dataset_path,save_path=save_path)
+    dataset_path = "examples/dataset/data/squad/squad_dataset.json"
+    save_path = "examples/dataset/data/squad/squad_dataset_similar_docs.json"
+    find_squad_similar_docs(dataset_path=dataset_path,save_path=save_path)

@@ -1750,11 +1750,11 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             #import pdb
             #pdb.set_trace()
             temp_data = model_input.sampling_metadata.selected_token_indices.clone()
-            model_input.sampling_metadata.selected_token_indices[0] = hidden_or_intermediate_states.shape[0]-1
+            model_input.sampling_metadata.selected_token_indices = torch.tensor(self.model.model.cache_fuse_metadata['selected_token_indices']).to(temp_data.device).to(temp_data.dtype)
             self.model.model.cache_fuse_metadata['check'] = False
             #pdb.set_trace()
             logits = self.model.compute_logits(hidden_or_intermediate_states, model_input.sampling_metadata)
-            model_input.sampling_metadata.selected_token_indices = temp_data
+            # model_input.sampling_metadata.selected_token_indices = temp_data
         else:
             logits = self.model.compute_logits(hidden_or_intermediate_states, model_input.sampling_metadata)
         

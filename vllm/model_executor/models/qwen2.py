@@ -361,6 +361,7 @@ class Qwen2Model(nn.Module):
             "attn_bias": None,
             "imp_indices": None,
             "org_seq_len": None,
+            "selected_token_indices": []
             }     
         self.old_kvs = [[None,None]] * len(self.layers)  
             
