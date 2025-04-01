@@ -28,7 +28,7 @@ class KVShareNewPipeline:
         tokenizer = AutoTokenizer.from_pretrained(model_name,local_files_only=True)
     
     @staticmethod
-    def get_kvcache_by_full_compute(model:LLM,sampling_params:SamplingParams, prompt:str,device:str="cuda:0"):
+    def get_kvcache_by_full_compute(model:LLM,sampling_params:SamplingParams, prompt:List[str],device:str="cuda:0"):
         model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["check"] = False
         model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata['collect'] = True
         model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["use_additional_indices"] = False
@@ -46,6 +46,7 @@ class KVShareNewPipeline:
             temp_key_cache = hack_kv[0].clone().to(device)
             temp_value_cache = hack_kv[1].clone().to(device)
             past_key_values.append(torch.stack([temp_key_cache,temp_value_cache],dim=0))    
+            llm_layers[j].self_attn.hack_kv = []
         past_key_values = torch.stack(past_key_values,dim=0)
         
         return past_key_values,output

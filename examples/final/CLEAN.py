@@ -1,11 +1,15 @@
 import json
 import matplotlib.pyplot as plt
 import numpy as np
-
+from tqdm import tqdm
 
 
 def clean(data_path,save_path,sim_threshold=0.75,token_reused_threshold=50):
-    
+    import langid
+
+# text = "Hello, world!"
+# language = detect(text)
+# print(language)  
     data = json.load(open(data_path))
     all_texts =  data["all_texts"]
     similar_pairs = data["similar_pairs"]
@@ -16,8 +20,13 @@ def clean(data_path,save_path,sim_threshold=0.75,token_reused_threshold=50):
     token_reused_values = []
     sample_densities = []
     
-    for pair in similar_pairs:
+    for pair in tqdm(similar_pairs):
         target_text = all_texts[str(pair["id"])]
+        language = langid.classify(target_text)[0]  # 输出 'es'（西班牙语）
+        # 只保留中文和英文内容
+        if language != "zh" and language != "en":
+            continue
+        
         if len(pair["high_similarity_top5"]) == 0 or len(pair["high_token_reused_top5"]) == 0:
             continue
         sim_top1 = pair["high_similarity_top5"][0]
@@ -144,7 +153,7 @@ def clean(data_path,save_path,sim_threshold=0.75,token_reused_threshold=50):
     plt.savefig('examples/pipeline/images/distribution_comparison.png')
     
     # Print statistics
-    print(f"Total samples: {len(token_reused_values)}")
+    print(f"过滤后的样本数量: {len(save_data)}")
     print("\nKey density point statistics:")
     for density in key_densities:
         idx_token = np.argmin(np.abs(np.array(token_density_values) - density))
@@ -158,11 +167,11 @@ def plot(save_path):
     pass
 
 if __name__=="__main__":
-    # data_path = "examples/dataset/data/insturctionv2/instruction_wildv2_similar_250331.json"
-    # save_path = "examples/dataset/data/insturctionv2/instruction_wildv2_similar_250331_clean.json"
-    # clean(data_path,save_path)
+    data_path = "examples/dataset/data/insturctionv2/instruction_wildv2_similar_250331.json"
+    save_path = "examples/dataset/data/insturctionv2/instruction_wildv2_similar_250331_clean.json"
+    clean(data_path,save_path,sim_threshold=0.7)
     
-    data_path = "examples/dataset/data/sharegpt/sharegpt90k_similar_250331.json"
-    save_path = "examples/dataset/data/sharegpt/sharegpt90k_similar_250331_clean.json"
-    clean(data_path,save_path)
+    # data_path = "examples/dataset/data/sharegpt/sharegpt90k_similar_250331.json"
+    # save_path = "examples/dataset/data/sharegpt/sharegpt90k_similar_250331_clean.json"
+    # clean(data_path,save_path)
     

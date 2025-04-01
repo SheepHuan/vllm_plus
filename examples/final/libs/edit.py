@@ -289,9 +289,17 @@ class KVEditor:
                 to_position[0] += batch_target_prefix_len
                 to_position[1] += batch_target_prefix_len
 
+                if from_position[1]-from_position[0] != to_position[1]-to_position[0]:
+                    print(from_position,to_position)
+                    continue
                 # 复制对应位置的kv缓存
-                target_kvcache[:, :, to_position[0]:to_position[1]+1, :] = source_kvcache[:, :, from_position[0]:from_position[1]+1, :]
-                reused_map_indices.extend(list(range(to_position[0],to_position[1]+1)))
+                try:
+                    target_kvcache[:, :, to_position[0]:to_position[1]+1, :] = source_kvcache[:, :, from_position[0]:from_position[1]+1, :]
+                    reused_map_indices.extend(list(range(to_position[0],to_position[1]+1)))
+                except Exception as e:
+                    print(e)
+                    print(from_position,to_position)
+                    continue
             
             # 去重并计算未被复用的位置
             reused_map_indices = list(set(reused_map_indices))

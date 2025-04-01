@@ -163,6 +163,7 @@ class Qwen2Attention(nn.Module):
                               quant_config=quant_config,
                               prefix=f"{prefix}.attn",
                               attn_type=attn_type)
+        # 逻辑需要修改
         self.hack_kv = []
 
     def forward(
@@ -188,6 +189,7 @@ class Qwen2Attention(nn.Module):
         if cache_fuse_metadata['collect'] and attn_metadata.prefill_metadata:
             
             if cache_fuse_metadata["use_additional_indices"]:
+                # NOTE 此状态不支持批处理
                 if k.shape[0] == old_kv[0].shape[0]:
                     self.hack_kv = [k.clone(), v.clone()]
                 else:
@@ -197,8 +199,13 @@ class Qwen2Attention(nn.Module):
                     value_old[cache_fuse_metadata["imp_indices"],:] = v
                     self.hack_kv = [key_old,value_old]
             else:
-                self.hack_kv = [k.clone(), v.clone()]
-        
+                # NOTE VLLM在批处理的时候可能会循环调用这个
+                if len(self.hack_kv)!=0:
+                    self.hack_kv[0] = torch.concat([self.hack_kv[0],k.clone()],dim=0)
+                    self.hack_kv[1] = torch.concat([self.hack_kv[1],v.clone()],dim=0)
+                else:
+                    self.hack_kv = [k.clone(), v.clone()]
+
         
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata,
