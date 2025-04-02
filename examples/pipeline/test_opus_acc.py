@@ -16,10 +16,23 @@ from scipy.stats import zscore
 import math
 import re
 import evaluate
+import matplotlib
+from matplotlib import font_manager 
+# download the font files and save in this fold
+font_path = "/root/code/vllm_plus/examples/dataset/data/fonts"
+ 
+font_files = font_manager.findSystemFonts(fontpaths=font_path)
+ 
+for file in font_files:
+    font_manager.fontManager.addfont(file)
+
+# 设置字体
+matplotlib.rcParams['font.family'] = 'Arial'  # 设置字体为黑体
+matplotlib.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
 
 
-def generate_output_data(input_path: str, output_path: str):
-    model_name = "Qwen/Qwen2.5-7B-Instruct"
+def generate_output_data(input_path: str, output_path: str,model_name = "Qwen/Qwen2.5-7B-Instruct"):
+    
     device = "cuda:0"
     pipeline = KVShareNewPipeline(model_name,device)
     
@@ -158,59 +171,47 @@ def plot_bleu_comparison(input_path: str, save_path: str = "examples/pipeline/im
     
     # 定义统一的颜色方案
     colors = {
-        'Full Compute': '#1f77b4',      # 蓝色
-        'Similarity Top1': '#2ca02c',    # 绿色
-        'Reused Token Top1': '#ff7f0e'   # 橙色
+        'Full Compute': 'red',      # 红色
+        'Similarity Top1': 'green',    # 绿色
+        'Reused Token Top1': 'blue'   # 蓝色
     }
     labels = list(colors.keys())
     
-    # 创建子图
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+    # 创建单个图
+    plt.figure(figsize=(8, 6))
     
-    # 1. 箱线图比较
+    # 添加ChatGPT参考线
+    plt.axvline(x=1.0, color='black', linestyle='--', alpha=0.5, label='Ground Truth')
+    
+    # 绘制CDF曲线
     data_to_plot = [full_compute_bleu, similarity_top1_bleu, reused_token_top1_bleu]
     
-    bp = ax1.boxplot(data_to_plot, labels=labels, patch_artist=True)
-    
-    # 设置箱线图颜色
-    for patch, label in zip(bp['boxes'], labels):
-        patch.set_facecolor(colors[label])
-        patch.set_alpha(0.6)
-    
-    # 添加数据点
-    for i, (data_points, label) in enumerate(zip(data_to_plot, labels), 1):
-        ax1.scatter([i] * len(data_points), data_points, 
-                   alpha=0.3, color=colors[label], s=20)
-    
-    ax1.set_ylabel('BLEU Score')
-    ax1.set_title('BLEU Score Distribution Comparison')
-    ax1.grid(True, alpha=0.3)
-    
-    # 2. 密度分布图
+    # 收集所有均值用于统一显示
+    means = []
     for scores, label in zip(data_to_plot, labels):
-        sns.kdeplot(data=scores, 
-                   label=label, 
-                   ax=ax2, 
-                   color=colors[label],
-                   fill=True, 
-                   alpha=0.3)
+        # 计算CDF
+        sorted_scores = np.sort(scores)
+        p = np.arange(1, len(scores) + 1) / len(scores)
+        
+        # 绘制CDF曲线
+        plt.plot(sorted_scores, p, label=label, color=colors[label], alpha=0.7)
+        
+        # 收集均值
+        mean_value = np.mean(scores)
+        means.append((label, mean_value))
     
-    ax2.set_xlabel('BLEU Score')
-    ax2.set_ylabel('Density')
-    ax2.set_title('BLEU Score Density Distribution')
-    ax2.grid(True, alpha=0.3)
-    ax2.legend()
+    # 统一显示所有均值
+    mean_text = "Means:\n" + "\n".join([f"{label}: {mean:.3f}" for label, mean in means])
+    plt.text(0.02, 0.87, mean_text, transform=plt.gca().transAxes, 
+             bbox=dict(facecolor='white', alpha=0.8))
     
-    # 添加统计信息
-    stats_text = (
-        f"Statistics:\n"
-        f"Full Compute: {np.mean(full_compute_bleu):.4f} ± {np.std(full_compute_bleu):.4f} (N={len(full_compute_bleu)})\n"
-        f"Similarity Top1: {np.mean(similarity_top1_bleu):.4f} ± {np.std(similarity_top1_bleu):.4f} (N={len(similarity_top1_bleu)})\n"
-        f"Reused Token Top1: {np.mean(reused_token_top1_bleu):.4f} ± {np.std(reused_token_top1_bleu):.4f} (N={len(reused_token_top1_bleu)})"
-    )
+    plt.xlabel('BLEU Score')
+    plt.ylabel('Cumulative Probability')
+    plt.title('BLEU Score Cumulative Distribution')
+    plt.grid(True, alpha=0.3)
     
-    plt.figtext(0.02, 0.02, stats_text, fontsize=10, 
-                bbox=dict(facecolor='white', alpha=0.8))
+    # 将图例放在图表右上角
+    plt.legend(loc='lower center')
     
     # 调整布局并保存
     plt.tight_layout()
@@ -240,7 +241,15 @@ def plot_bleu_comparison(input_path: str, save_path: str = "examples/pipeline/im
 
 if __name__ == "__main__":
     os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+    os.environ["VLLM_USE_MODELSCOPE"]="True"
     input_path = "examples/dataset/data/opus/opus_dataset_en-zh_similar_docs_top50_test1.json"
-    output_path = "examples/dataset/data/opus/opus_dataset_en-zh_similar_docs_top50_test1_output.json"
+    
+    # model_name = "Qwen/Qwen2.5-32B-Instruct-GPTQ-Int4"
+    # output_path = "examples/dataset/data/opus/opus_dataset_en-zh_similar_docs_top50_test1_output_qwen2.5-32b.json"
     # generate_output_data(input_path,output_path)
-    plot_bleu_comparison(output_path)
+    
+    # outputs = [
+    #     ("Llama3.1-8B",)
+    # ]
+    
+    # plot_bleu_comparison(output_path)

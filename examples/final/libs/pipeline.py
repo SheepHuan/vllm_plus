@@ -19,11 +19,12 @@ class KVShareNewPipeline:
         self.model = LLM(model=model_name,
                         device=device,
                         dtype="bfloat16",
-                        max_model_len=5000,
-                        gpu_memory_utilization=0.7,
+                        max_model_len=24000,
+                        gpu_memory_utilization=0.95,
                         multi_step_stream_outputs=True,
                         enforce_eager=True,
-                        disable_async_output_proc=True
+                        disable_async_output_proc=True,
+                        trust_remote_code=True
                     )
         tokenizer = AutoTokenizer.from_pretrained(model_name,local_files_only=True)
     

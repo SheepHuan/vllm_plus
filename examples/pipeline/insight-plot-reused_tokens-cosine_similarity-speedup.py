@@ -507,24 +507,26 @@ def plot_three_way_analysis(data_path: str, image_save_path: str = "examples/pip
         
         ax.set_xlabel(xlabel)
         ax.set_ylabel(ylabel)
-        ax.set_title(title)
         ax.grid(True, alpha=0.3)
         ax.legend(fontsize=8)
+        
+        # 设置图题在下方
+        ax.set_title(title, pad=20, y=-0.23, fontsize=14)
         
         return im
 
     # 绘制三个热力图
     im1 = create_heatmap_with_stats(ax1, similarities, speed_ups, 
                                    "Cosine Similarity", "Speed Up Ratio",
-                                   "Cosine Similarity vs Speed Up")
+                                   "(a)")
     
     im2 = create_heatmap_with_stats(ax2, reused_tokens, speed_ups,
                                    "Reused Tokens", "Speed Up Ratio",
-                                   "Token Reused Num vs Speed Up")
+                                   "(b)")
     
-    im3 = create_heatmap_with_stats(ax3, similarities, reused_tokens,
-                                   "Cosine Similarity", "Reused Tokens",
-                                   "Cosine Similarity vs Token Reused Num")
+    im3 = create_heatmap_with_stats(ax3, reused_tokens, similarities,
+                                   "Reused Tokens", "Cosine Similarity",
+                                   "(c)")
 
     # 添加共用的颜色条
     plt.colorbar(im1, cax=cax, label='Normalized Samples Density')

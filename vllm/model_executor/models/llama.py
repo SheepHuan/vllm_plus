@@ -217,6 +217,7 @@ class LlamaAttention(nn.Module):
         if cache_fuse_metadata['collect'] and attn_metadata.prefill_metadata:
             
             if cache_fuse_metadata["use_additional_indices"]:
+                # NOTE 此状态不支持批处理
                 if k.shape[0] == old_kv[0].shape[0]:
                     self.hack_kv = [k.clone(), v.clone()]
                 else:
@@ -226,7 +227,12 @@ class LlamaAttention(nn.Module):
                     value_old[cache_fuse_metadata["imp_indices"],:] = v
                     self.hack_kv = [key_old,value_old]
             else:
-                self.hack_kv = [k.clone(), v.clone()]
+                # NOTE VLLM在批处理的时候可能会循环调用这个
+                if len(self.hack_kv)!=0:
+                    self.hack_kv[0] = torch.concat([self.hack_kv[0],k.clone()],dim=0)
+                    self.hack_kv[1] = torch.concat([self.hack_kv[1],v.clone()],dim=0)
+                else:
+                    self.hack_kv = [k.clone(), v.clone()]
         
         
         q, k = self.rotary_emb(positions, q, k)
@@ -383,6 +389,7 @@ class LlamaModel(nn.Module):
             "attn_bias": None,
             "imp_indices": None,
             "org_seq_len": None,
+            "selected_token_indices": []
             }     
         self.old_kvs = [[None,None]] * len(self.layers)  
 
@@ -452,12 +459,11 @@ class LlamaModel(nn.Module):
             
             if temp_status==1:
                 positions = positions[self.cache_fuse_metadata["imp_indices"]]
-            if self.cache_fuse_metadata["use_additional_indices"]:
-                
-                if temp_status in [1,2]:
-                    update_kv = self.layers[i].self_attn.hack_kv
-                    self.old_kvs[i][0][self.cache_fuse_metadata["imp_indices"],:] = update_kv[0][self.cache_fuse_metadata["imp_indices"],:]
-                    self.old_kvs[i][1][self.cache_fuse_metadata["imp_indices"],:] = update_kv[1][self.cache_fuse_metadata["imp_indices"],:] 
+            # if self.cache_fuse_metadata["use_additional_indices"]:
+            #     if temp_status in [1,2]:
+            #         update_kv = self.layers[i].self_attn.hack_kv
+            #         self.old_kvs[i][0][self.cache_fuse_metadata["imp_indices"],:] = update_kv[0][self.cache_fuse_metadata["imp_indices"],:]
+            #         self.old_kvs[i][1][self.cache_fuse_metadata["imp_indices"],:] = update_kv[1][self.cache_fuse_metadata["imp_indices"],:] 
             
 
         if not get_pp_group().is_last_rank:

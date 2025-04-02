@@ -1466,18 +1466,18 @@ if __name__ == "__main__":
     # plot_similarity_reuse_rate(data,save_path="examples/pipeline/images/similarity_reuse_rate.png")
     
     
-    kverr_data = [
-        # {
-        #     "tag": "InstructionWild v2",
-        #     "path": "examples/dataset/data/similar/instruction_wildv2/instruction_wildv2_batch_embeddings_clusters_similar_pairs_high_correlation_kverr.json",
-        #     # "color": "blue"
-        # },
-        {
-            "tag": "ShareGPT-90k",
-            "path": "examples/dataset/data/similar/sharegpt/sharegpt90k_batch_embeddings_clusters_similar_pairs_high_correlation_kverr.json",
-            # "color": "blue"
-        },
+    # kverr_data = [
+    #     # {
+    #     #     "tag": "InstructionWild v2",
+    #     #     "path": "examples/dataset/data/similar/instruction_wildv2/instruction_wildv2_batch_embeddings_clusters_similar_pairs_high_correlation_kverr.json",
+    #     #     # "color": "blue"
+    #     # },
+    #     {
+    #         "tag": "ShareGPT-90k",
+    #         "path": "examples/dataset/data/similar/sharegpt/sharegpt90k_batch_embeddings_clusters_similar_pairs_high_correlation_kverr.json",
+    #         # "color": "blue"
+    #     },
         
-    ]
+    # ]
     
-    plot_kverr_distribution(kverr_data,show_full_reuse=False)
+    # plot_kverr_distribution(kverr_data,show_full_reuse=False)
