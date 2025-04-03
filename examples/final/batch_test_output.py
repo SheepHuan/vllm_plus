@@ -94,7 +94,7 @@ def partial_compute_qwen2(data_path, save_path, model_name="Qwen/Qwen2.5-7B-Inst
         has_run_key = set()
         has_run_data = []
     
-    data = [item for item in data if item["target_text"]["id"] not in has_run_key]
+    data = [item for item in data if item["target_text"]["id"] not in has_run_key and len(tokenizer.encode(item["target_text"]["text"]))<3000]
   
     
     for i in tqdm(range(0, len(data), batch_size), desc="Processing batches"):
@@ -154,7 +154,7 @@ def partial_compute_qwen2(data_path, save_path, model_name="Qwen/Qwen2.5-7B-Inst
                 save_data.append(item)
         except Exception as e:
             print(f"处理批次时出错: {str(e)}")
-            print(f"错误详情: {traceback.format_exc()}")
+            # print(f"错误详情: {traceback.format_exc()}")
             with open(save_path,"w") as f:
                 json.dump(save_data+has_run_data,f,indent=4,ensure_ascii=False)
             continue
@@ -198,10 +198,11 @@ if __name__ == "__main__":
     # os.environ["VLLM_USE_MODELSCOPE"]="true"
     # export VLLM_USE_MODELSCOPE=True
     # model_name = "Qwen/Qwen2.5-7B-Instruct"
-    # model_name = "Qwen/Qwen2.5-32B-Instruct-GPTQ-Int4"、
+    template_text = qwen_template_text
+    model_name = "Qwen/Qwen2.5-32B-Instruct-GPTQ-Int4"
     # model_name = "/root/.cache/modelscope/hub/models/LLM-Research/Meta-Llama-3.1-8B-Instruct"
-    model_name = "LLM-Research/Meta-Llama-3.1-8B-Instruct-GPTQ-Int4"
-    template_text = llama3_template_text
+    # model_name = "LLM-Research/Meta-Llama-3.1-8B-Instruct-GPTQ-Int4"
+    # template_text = llama3_template_text
     # data_path = "examples/dataset/data/insturctionv2/instruction_wildv2_similar_250331_clean.json"
     # gpt_path = "examples/final/data/instruction_wildv2_similar_250331_answer_by_chatgpt.json"
     # save_path = f"examples/final/data/instruction_wildv2_similar_250331_answer_by_{model_name.split('/')[-1]}_partial_output.json"
@@ -214,6 +215,6 @@ if __name__ == "__main__":
     save_path = f"examples/pipeline/data/data/sharegpt90k_similar_250331_answer_by_{model_name.split('/')[-1]}_partial_output.json"
     
     # test_gpt(data_path,gpt_path)
-    partial_compute_qwen2(gpt_path,save_path,model_name,batch_size=1)
+    partial_compute_qwen2(gpt_path,save_path,model_name,batch_size=2)
     # chech_move(data_path)
     

@@ -535,6 +535,133 @@ def plot_three_way_analysis(data_path: str, image_save_path: str = "examples/pip
     plt.savefig(image_save_path, dpi=300, bbox_inches="tight")
     plt.close()
 
+def plot_three_way_analysis_separate(data_path: str, save_dir: str):
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    from scipy.stats import zscore, pearsonr
+
+    # 加载和处理数据
+    data = json.load(open(data_path, "r"))
+    
+    # 提取数据
+    speed_ups = []
+    similarities = []
+    reused_tokens = []
+   
+    for item in data:
+        if item["speed_up_ratio"] < 1.1:
+            continue
+        reused_token_count = int(item["reuse_ratio"] * item["target_token_len"])
+        if reused_token_count > 1024:
+            continue
+        speed_ups.append(item["speed_up_ratio"])
+        similarities.append(item["cosine_similarity"]["colbert"])
+        reused_tokens.append(reused_token_count)
+
+    # 转换为numpy数组并过滤异常值
+    similarities = np.array(similarities)
+    speed_ups = np.array(speed_ups)
+    reused_tokens = np.array(reused_tokens)
+    
+    z_scores = zscore(speed_ups)
+    mask = np.abs(z_scores) < 3
+    similarities = similarities[mask]
+    speed_ups = speed_ups[mask]
+    reused_tokens = reused_tokens[mask]
+
+    def create_heatmap_with_stats(x_data, y_data, xlabel, ylabel, title, save_path, show_colorbar=True,size=(4, 3)):
+        plt.figure(figsize=size)
+        
+        # 计算相关系数
+        corr, p_value = pearsonr(x_data, y_data)
+        
+        # 创建热力图数据
+        x_bins = np.linspace(min(x_data), max(x_data), 40)
+        y_bins = np.linspace(min(y_data), max(y_data), 40)
+        density, _, _ = np.histogram2d(x_data, y_data, bins=[x_bins, y_bins])
+        density = density / density.max()
+        
+        # 计算每个区间的统计量
+        bin_means = []
+        bin_stds = []
+        for i in range(len(x_bins)-1):
+            mask = (x_data >= x_bins[i]) & (x_data < x_bins[i+1])
+            if np.sum(mask) > 0:
+                bin_means.append(np.mean(y_data[mask]))
+                bin_stds.append(np.std(y_data[mask]))
+            else:
+                bin_means.append(np.nan)
+                bin_stds.append(np.nan)
+        
+        # 绘制热力图
+        cmap = plt.cm.YlOrRd.copy()
+        cmap.set_under('white')
+        im = plt.imshow(density.T, origin='lower', aspect='auto',
+                      extent=[min(x_data), max(x_data), 
+                             min(y_data), max(y_data)],
+                      cmap=cmap,
+                      vmin=0.0003,
+                      vmax=1)
+        
+        # 根据参数决定是否添加颜色条
+        if show_colorbar:
+            plt.colorbar(im, label='Normalized Samples Density')
+        
+        # 绘制误差线
+        bin_centers = (x_bins[:-1] + x_bins[1:]) / 2
+        valid_mask = ~np.isnan(bin_means)
+        bin_means_array = np.array(bin_means)[valid_mask]
+        bin_stds_array = np.array(bin_stds)[valid_mask]
+        centers = bin_centers[valid_mask]
+        
+        plt.errorbar(centers, 
+                   bin_means_array,
+                   yerr=bin_stds_array,
+                   color='blue', 
+                   fmt='o-', 
+                   markersize=4,
+                   alpha=0.6,
+                   label='Mean ± Std')
+        
+        # 添加相关系数
+        plt.text(0.05, 0.95, f'Correlation: {corr:.3f}',
+                transform=plt.gca().transAxes,
+                bbox=dict(facecolor='white', alpha=0.8, edgecolor='gray'),
+                verticalalignment='top',
+                fontsize=10)
+        
+        plt.xlabel(xlabel)
+        plt.ylabel(ylabel)
+        plt.grid(True, alpha=0.3)
+        plt.legend(fontsize=10)
+        # plt.title(title, pad=20, fontsize=14)
+        
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        plt.close()
+
+    # 创建三个独立的图表，所有图都显示颜色条
+    create_heatmap_with_stats(similarities, speed_ups, 
+                            "Cosine Similarity", "Speed Up Ratio",
+                            "(a) Semantic Similarity vs Speed Up",
+                            os.path.join(save_dir, "similarity_vs_speedup.pdf"),
+                            show_colorbar=True,
+                            size=(4, 3))
+    
+    create_heatmap_with_stats(reused_tokens, speed_ups,
+                            "Reused Tokens", "Speed Up Ratio",
+                            "(b) Reused Tokens vs Speed Up",
+                            os.path.join(save_dir, "reused_tokens_vs_speedup.pdf"),
+                            show_colorbar=True,
+                            size=(4, 3))
+    
+    create_heatmap_with_stats(reused_tokens, similarities,
+                            "Reused Tokens", "Cosine Similarity",
+                            "(c) Reused Tokens vs Semantic Similarity",
+                            os.path.join(save_dir, "reused_tokens_vs_similarity.pdf"),
+                            show_colorbar=True,
+                            size=(4, 3))
+
 if __name__ == "__main__":
     import os
     os.environ["CUDA_VISIBLE_DEVICES"] = "1"
@@ -546,22 +673,11 @@ if __name__ == "__main__":
     image1_save_path = os.path.join(save_dir,"reused_tokens_with_speed_up.png")
     image2_save_path = os.path.join(save_dir,"cosine_similar_with_speedup.png")
     image_save_path = os.path.join(save_dir,"three_way_analysis.png")
-    # instruction_wildv2_data_path = "examples/dataset/data/similar/instruction_wildv2/instruction_wildv2_batch_embeddings_clusters_similar_pairs_cosine_similarity.json"
-    # instruction_wildv2_profiled_path = "examples/dataset/data/similar/instruction_wildv2/instruction_wildv2_batch_embeddings_clusters_similar_pairs_cosine_similarity_profiled.json"
-    # instruction_wildv2_long_token_path = "examples/dataset/data/similar/instruction_wildv2/instruction_wildv2_batch_embeddings_clusters_similar_pairs_cosine_similarity_long_token.json"
-    # select_data(instruction_wildv2_data_path,instruction_wildv2_long_token_path,min_token_len=100)
-    
-    # compute_reuse_ratio_with_efficiency(model_name,instruction_wildv2_long_token_path,device=device,save_path=instruction_wildv2_profiled_path)
-    
     
     shargpt_data_path = "examples/dataset/data/similar/sharegpt/sharegpt90k_batch_embeddings_clusters_similar_pairs_cosine_similarity.json"
-    
     shargpt_long_token_path = "examples/dataset/data/similar/sharegpt/sharegpt90k_batch_embeddings_clusters_similar_pairs_cosine_similarity_long_token.json"
     shargpt_profiled_path = "examples/dataset/data/similar/sharegpt/sharegpt90k_batch_embeddings_clusters_similar_pairs_cosine_similarity_profiled.json"
-    # select_data(shargpt_data_path,shargpt_long_token_path,min_token_len=100)
     
-    # compute_reuse_ratio_with_efficiency(model_name,shargpt_long_token_path,device=device,save_path=shargpt_save_path)
-    # compute_cosine_similarity(shargpt_save_path,shargpt_save_path,device=device)
-    # plot_reused_tokens_with_speedup(shargpt_long_token_path,image1_save_path)
-    plot_three_way_analysis(shargpt_profiled_path,image_save_path)
+    # 使用新的函数生成三个独立的图表
+    plot_three_way_analysis_separate(shargpt_profiled_path, save_dir)
     

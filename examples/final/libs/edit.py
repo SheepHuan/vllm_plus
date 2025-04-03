@@ -146,7 +146,7 @@ class KVEditor:
                     reused_tokens.add(i)
             
             reused_count = len(reused_tokens)
-            reuse_ratio = reused_count / len(target_tokens) * 100
+            reuse_ratio = reused_count / (len(target_tokens)+1e-8) * 100
             
 
             # 对每个匹配的子串，记录其移动操作（包括位置相同的）
@@ -155,7 +155,7 @@ class KVEditor:
                 target_start, target_end = segment["target_span"]
                 
                 moves.append({
-                    "text": '' if tokenizer is None else tokenizer.decode(source_tokens[source_start:source_end + 1]),
+                    # "text": '' if tokenizer is None else tokenizer.decode(source_tokens[source_start:source_end + 1]),
                     "from_position": (source_start, source_end),
                     "to_position": (target_start, target_end)
                 })
@@ -218,13 +218,25 @@ class KVEditor:
                                    device=device)
         
         reused_map_indices = []
-        
+        expand_num = 1
         # 根据移动信息更新KV缓存
         for move in moves:       
             source_start, source_end = move[0] # from_position
             target_start, target_end = move[1] # to_position
+            
+            source_end = source_end-expand_num
+            source_start = source_start + expand_num
+            
+            target_start = target_start + expand_num
+            target_end = target_end - expand_num
+            
+            if target_start >= target_end or source_start >=source_end:
+                continue
+            
             # 复制KV缓存值
             target_kvcache[:, :, target_start:target_end+1, :] = source_kvcache[:, :, source_start:source_end+1, :]
+            
+            
             reused_map_indices.extend(list(range(
                 target_start,
                 target_end+1
@@ -233,10 +245,10 @@ class KVEditor:
         # 计算未复用的token索引
         unreused_map_indices = list(set(range(target_token_length)) - set(reused_map_indices))
         
-        return target_kvcache, reused_map_indices, unreused_map_indices
+        return target_kvcache, reused_map_indices, unreused_map_indices,[len(unreused_map_indices)-1]
     
     
-    def batch_kvedit(batch_targets_token_ids, batch_sources_token_ids, source_kvcache: torch.Tensor):
+    def batch_kvedit(batch_targets_token_ids, batch_sources_token_ids, source_kvcache: torch.Tensor,window_size=2):
         """
         批量应用移动操作到KV缓存
         
@@ -276,7 +288,7 @@ class KVEditor:
         # 逐个处理每个样本
         for idx,(source_token_ids,target_token_ids) in enumerate(zip(batch_sources_token_ids,batch_targets_token_ids)):
             # 计算当前样本的文本差异
-            diff_report = KVEditor.find_text_differences(source_token_ids,target_token_ids)
+            diff_report = KVEditor.find_text_differences(source_token_ids,target_token_ids,window_size=window_size)
             reused_map_indices = []
             
             # 处理每个移动操作
@@ -306,13 +318,8 @@ class KVEditor:
             unreused_map_indices = list(set(range(batch_target_prefix_len,batch_target_prefix_len+len(target_token_ids))) - set(reused_map_indices))
             
             # 确保最后一个token总是被重新计算
-            if len(target_token_ids)-1 not in unreused_map_indices:
+            if len(target_token_ids)-1 + batch_target_prefix_len not in unreused_map_indices:
                 unreused_map_indices.append(len(target_token_ids)-1 + batch_target_prefix_len)
-            
-            # # 调整索引，加上之前样本的累积长度
-            # reused_map_indices = [reused_map_indices[i]+batch_target_prefix_len for i in range(len(reused_map_indices))]
-            # unreused_map_indices = [unreused_map_indices[i]+batch_target_prefix_len for i in range(len(unreused_map_indices))]
-            
             
             # 更新累积长度
             batch_source_prefix_len += len(source_token_ids)
@@ -440,5 +447,38 @@ class KVEditor:
         # Print results
         print_results(batch_data, batch_moves, target_kv_cache, reused_map_indices, tokenizer)
 
+def test_acc():
+    import copy
+    data = json.load(open("examples/dataset/data/opus/opus_dataset_en-zh_similar_docs_top50_250403_windows.json", "r"))
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
+    all_data = data["all_translations"]
+    similar_pairs = data["similar_pairs"]
+    from tqdm import tqdm
+    for item in tqdm(similar_pairs,desc="Processing"):
+        target_text = all_data[str(item["id"])]["zh"]
+        source_text = all_data[str(item["reused_top1_w7"]["id"])]["zh"]
+        
+        target_token_ids = tokenizer.encode(target_text)
+        source_token_ids = tokenizer.encode(source_text)
+        
+        diff_report = KVEditor.find_text_differences(source_token_ids,target_token_ids,window_size=7)
+        modified_token_ids = copy.deepcopy(target_token_ids)
+        
+        for move in diff_report["moves"]:
+            from_pos = move["from_position"]
+            to_pos = move["to_position"]
+            modified_token_ids[to_pos[0]:to_pos[1]+1] = source_token_ids[from_pos[0]:from_pos[1]+1]
+        
+        if modified_token_ids == target_token_ids:
+            continue
+        else:
+            print(tokenizer.decode(modified_token_ids))
+            print(tokenizer.decode(target_token_ids))
+            # break
+        
+        
+        
+
 if __name__=="__main__":
-    KVEditor.test_acc()
+    # KVEditor.test_acc()
+    test_acc()

@@ -179,7 +179,7 @@ def find_opus_similar_docs(dataset_path: str, save_path: str, config: str):
                 # 计算token重用数量
                 candidate_tokens = tokenizer.encode(candidate["entity"]["translation"][target_lang])
                 diff_report = find_text_differences(candidate_tokens, source_target_tokens)
-                reused_tokens = sum(len(move["to_position"]) for move in diff_report["moves"])
+                reused_tokens = sum([move["to_position"][1]-move["to_position"][0] for move in diff_report["moves"]])
                 
                 # 保存相似度和重用token信息
                 similar_docs.append({
@@ -217,7 +217,7 @@ if __name__ == "__main__":
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     config = "en-zh"
     dataset_path = f"examples/dataset/data/opus/opus_dataset_{config}.json"
-    save_path = f"examples/dataset/data/opus/opus_dataset_{config}_similar_docs_250331.json"
+    save_path = f"examples/dataset/data/opus/opus_dataset_{config}_similar_docs_250403.json"
     #process_opus_dataset(save_path,config)
     #embed_opus_dataset(dataset_path: str, config: str, batch_size: int = 32)
     find_opus_similar_docs(dataset_path=dataset_path, save_path=save_path, config=config)

@@ -506,14 +506,21 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             # FIXME: 需要修改,防止出现additional_map_indices为空的情况
             if  cache_fuse_metadata["use_additional_indices"]:
                 # old_indices = cache_fuse_metadata["old_kv_map_indices"]
-                # additional_indices = cache_fuse_metadata["additional_map_indices"]
+                # if len(old_indices) !=0:
+                # # additional_indices = cache_fuse_metadata["additional_map_indices"]
                 
-                # temp_diff = torch.zeros(key.shape[0],device=query.device).to(query.dtype)
-                # temp_diff[old_indices] = torch.sum((value[old_indices,:,:]-value_old[old_indices,:,:])**2, dim=[1,2])
-                # temp_diff[additional_indices] = 0
-                # topk_num = int(len(temp_diff)*cache_fuse_metadata["recomp_ratio"])
-                # top_indices = torch.topk(temp_diff, k=topk_num).indices
-                # # unique
+                #     temp_diff = torch.zeros(key.shape[0],device=query.device).to(query.dtype)
+                #     temp_diff[old_indices] = torch.sum((value[old_indices,:,:]-value_old[old_indices,:,:])**2, dim=[1,2])
+                #     # temp_diff[additional_indices] = 0
+                #     topk_num = int(len(temp_diff)*cache_fuse_metadata["recomp_ratio"])
+                #     top_indices = torch.topk(temp_diff, k=topk_num).indices
+                #     top_indices = torch.cat([top_indices,cache_fuse_metadata["additional_map_indices"]])
+                #     if key.shape[0]-1 not in top_indices:
+                #         top_indices = torch.cat([top_indices,torch.tensor([key.shape[0]-1],device=query.device)])
+                #     top_indices,_ = torch.sort(top_indices)
+                # else:
+                #     top_indices = cache_fuse_metadata["additional_map_indices"]
+                    # # unique
                 # top_indices = torch.cat([top_indices,additional_indices])
                 # top_indices = torch.unique(top_indices)
                 
@@ -524,12 +531,13 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 # cache_fuse_metadata["imp_indices"] = top_indices
                 
                 # NOTE 仅仅将最后一个token加入到additional_map_indices中
-                top_indices = cache_fuse_metadata["additional_map_indices"]
+                
                 # if len(additional_indices) > 0:
                 #     top_indices = torch.cat([additional_indices,torch.tensor([key.shape[0]-1],device=query.device)])
                 #     top_indices = torch.unique(top_indices)
                 # else:
                 #     top_indices = torch.tensor([key.shape[0]-1],device=query.device)
+                top_indices = cache_fuse_metadata["additional_map_indices"]
                 cache_fuse_metadata["imp_indices"] = top_indices
                 query = query[top_indices,:,:]
                 attn_bias = LowerTriangularFromBottomRightMask()

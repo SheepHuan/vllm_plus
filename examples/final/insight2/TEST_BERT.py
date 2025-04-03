@@ -69,9 +69,9 @@ def plot_bert_cdf(ax, full_scores, sim_scores, reused_scores):
         means.append((label, mean_value))
     
     # 统一显示所有均值
-    mean_text = "Means:\n" + "\n".join([f"{label}: {mean:.3f}" for label, mean in means])
-    ax.text(0.02, 0.78, mean_text, transform=ax.transAxes, 
-             bbox=dict(facecolor='white', alpha=0.8))
+    # mean_text = "Means:\n" + "\n".join([f"{label}: {mean:.3f}" for label, mean in means])
+    # ax.text(0.02, 0.78, mean_text, transform=ax.transAxes, 
+    #          bbox=dict(facecolor='white', alpha=0.8))
     
     ax.set_xlabel('BERT Score')
     ax.set_ylabel('Cumulative Probability')
@@ -156,7 +156,7 @@ def test_bert(data_path, save_path):
         save_path: 保存图片的路径
     """
     # 创建单个图
-    fig, ax = plt.subplots(figsize=(6, 4))
+    fig, ax = plt.subplots(figsize=(4, 3))
     
     # 读取数据
     data = json.load(open(data_path, "r"))
@@ -191,13 +191,23 @@ if __name__ == "__main__":
     # save_path = "examples/pipeline/images/bert_scores_comparison.png"
     # test_bert(data_paths, save_path) 
     # 处理第一个模型
-    data_path = "examples/final/data/instruction_wildv2_similar_250331_answer_by_Meta-Llama-3.1-8B-Instruct_partial_output.json"
-    # title = "Llama3.1-8B"
-    save_path = "examples/pipeline/images/bert_scores_llama3.1_8b.png"
-    test_bert(data_path, save_path)
+    # data_path = "examples/pipeline/data/data/instruction_wildv2_similar_250331_answer_by_Meta-Llama-3.1-8B-Instruct_partial_output.json"
+    # # title = "Llama3.1-8B"
+    # save_path = "examples/pipeline/images/instruction_wildv2_similar_250331_bert_scores_llama3.1_8b.pdf"
+    # test_bert(data_path, save_path)
 
-    # 处理第二个模型
-    data_path = "examples/final/data/instruction_wildv2_similar_250331_answer_by_Qwen2.5-32B-Instruct-GPTQ-Int4_partial_output.json"
-    # title = "Qwen2.5-32B"
-    save_path = "examples/pipeline/images/bert_scores_qwen2.5_32b.png"
+    # # 处理第二个模型
+    # data_path = "examples/pipeline/data/data/instruction_wildv2_similar_250331_answer_by_Qwen2.5-32B-Instruct-GPTQ-Int4_partial_output.json"
+    # # title = "Qwen2.5-32B"
+    # save_path = "examples/pipeline/images/instruction_wildv2_similar_250331_bert_scores_qwen2.5_32b.pdf"
+    # test_bert(data_path, save_path)
+    
+    
+    data_path = "examples/pipeline/data/data/sharegpt90k_similar_250331_answer_by_Meta-Llama-3.1-8B-Instruct-GPTQ-Int4_partial_output.json"
+    save_path = "examples/pipeline/images/sharegpt90k_similar_250331_bert_scores_llama3.1_8b.pdf"
     test_bert(data_path, save_path)
+    
+    # data_path = "examples/pipeline/data/data/sharegpt90k_similar_250331_answer_by_Qwen2.5-32B-Instruct-GPTQ-Int4_partial_output.json"
+    # save_path = "examples/pipeline/images/sharegpt90k_similar_250331_bert_scores_qwen2.5_32b.pdf"
+    # test_bert(data_path, save_path)
+    

@@ -158,7 +158,7 @@ def find_sharegpt_similar_docs(dataset_path: str, save_path: str):
                     tokenizer.encode(candidate_text), 
                     source_tokens
                 )
-                reused_tokens = sum(len(move["to_position"]) for move in diff_report["moves"])
+                reused_tokens = sum([move["to_position"][1]-move["to_position"][0] for move in diff_report["moves"]])
                 
                 # 保存相似度和重用token信息
                 doc_info = {
@@ -206,7 +206,7 @@ def find_sharegpt_similar_docs(dataset_path: str, save_path: str):
 if __name__ == "__main__":
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     dataset_path = "examples/dataset/data/sharegpt/sharegpt90k_ppl.json"
-    save_path = "examples/dataset/data/sharegpt/sharegpt90k_similar_250331.json"
+    save_path = "examples/dataset/data/sharegpt/sharegpt90k_similar_250403.json"
     # embed_sharegpt_dataset(dataset_path, batch_size=128)
     # process_sharegpt_dataset(dataset_path)
     find_sharegpt_similar_docs(dataset_path, save_path)

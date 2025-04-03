@@ -19,7 +19,7 @@ class KVShareNewPipeline:
         self.model = LLM(model=model_name,
                         device=device,
                         dtype="bfloat16",
-                        max_model_len=24000,
+                        max_model_len=32768,
                         gpu_memory_utilization=0.95,
                         multi_step_stream_outputs=True,
                         enforce_eager=True,
@@ -36,18 +36,22 @@ class KVShareNewPipeline:
         model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["additional_map_indices"] = None
         model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["old_kv_map_indices"] = None
         model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["imp_indices"] = None
+        num_layer = len(model.llm_engine.model_executor.driver_worker.model_runner.model.model.layers)
+        for j in range(num_layer):
+            model.llm_engine.model_executor.driver_worker.model_runner.model.model.layers[j].self_attn.hack_kv = []
+        
         output:List[RequestOutput] = model.generate(prompt, sampling_params,use_tqdm=False)
         
         llm_layers = model.llm_engine.model_executor.driver_worker.model_runner.model.model.layers
     
         past_key_values = []
-        num_layer = len(llm_layers)
+       
         for j in range(num_layer):
             hack_kv = llm_layers[j].self_attn.hack_kv
             temp_key_cache = hack_kv[0].clone().to(device)
             temp_value_cache = hack_kv[1].clone().to(device)
             past_key_values.append(torch.stack([temp_key_cache,temp_value_cache],dim=0))    
-            llm_layers[j].self_attn.hack_kv = []
+            # llm_layers[j].self_attn.hack_kv = []
         past_key_values = torch.stack(past_key_values,dim=0)
         
         return past_key_values,output
@@ -61,7 +65,7 @@ class KVShareNewPipeline:
         return KVEditor.apply_change(target_token_ids,source_kvcache,diff_report)
 
     @staticmethod
-    def full_compute(llm_model,sampling_params:SamplingParams,prompt:str):
+    def full_compute(llm_model,sampling_params:SamplingParams,prompt:str) -> List[RequestOutput]:
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["check"] = False
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata['collect'] = False
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["use_additional_indices"] = False
@@ -75,7 +79,7 @@ class KVShareNewPipeline:
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata['collect'] = False
         output = llm_model.generate(prompt,sampling_params,use_tqdm=False)
         ttft_time = output[0].metrics.first_token_time-output[0].metrics.first_scheduled_time
-        return output[0].outputs[0].text,output[0].prompt_token_ids,ttft_time
+        return output
     
     
     @staticmethod
@@ -109,6 +113,8 @@ class KVShareNewPipeline:
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["selected_token_indices"] = selected_token_indices
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.old_kvs = reused_kvcache
         outputs = llm_model.generate(text,sampling_params,use_tqdm=False)
+        
+        
         # ttft_time = outputs[0].metrics.first_token_time-outputs[0].metrics.first_scheduled_time
         return outputs
     
