@@ -96,49 +96,43 @@ def partial_compute_qwen2(data_path, save_path, model_name="Qwen/Qwen2.5-7B-Inst
     
     data = [item for item in data if item["target_text"]["id"] not in has_run_key and len(tokenizer.encode(item["target_text"]["text"]))<3000]
   
-    
-    for i in tqdm(range(0, len(data), batch_size), desc="Processing batches"):
+    for item in tqdm(data, desc="Processing items"):
         try:
-            batch_items = data[i:i + batch_size]
-            # print(i)
-            # 批量准备prompt
-            all_source_prompts = []
-            all_target_prompts = []
-            for item in batch_items:
-                source_prompts = [item["sim_top1"]["text"], item["reused_top1"]["text"]]
-                target_prompts = [item["target_text"]["text"] for _ in range(len(source_prompts))]
-                
-                all_source_prompts.extend([template_text.format(user_text=prompt) for prompt in source_prompts])
-                all_target_prompts.extend([template_text.format(user_text=prompt) for prompt in target_prompts])
+            # 准备prompt
+            source_prompts = [item["sim_top1"]["text"], item["reused_top1"]["text"]]
+            target_prompts = [item["target_text"]["text"] for _ in range(len(source_prompts))]
+            
+            source_prompts = [template_text.format(user_text=prompt) for prompt in source_prompts]
+            target_prompts = [template_text.format(user_text=prompt) for prompt in target_prompts]
 
-            # 批量计算full compute
+            # 计算full compute
             full_compute_target_outputs = KVShareNewPipeline.batch_full_compute(
                 pipeline.model,
                 SamplingParams(temperature=0.0, max_tokens=512),
-                all_target_prompts
+                target_prompts
             )
-            batch_target_token_ids = [output.prompt_token_ids for output in full_compute_target_outputs]
+            target_token_ids = [output.prompt_token_ids for output in full_compute_target_outputs]
             
-            # 批量获取kv cache
-            batch_source_key_values, batch_source_outputs = KVShareNewPipeline.get_kvcache_by_full_compute(
+            # 获取kv cache
+            source_key_values, source_outputs = KVShareNewPipeline.get_kvcache_by_full_compute(
                 pipeline.model,
                 SamplingParams(temperature=0.0, max_tokens=1),
-                all_source_prompts
+                source_prompts
             )
-            batch_source_token_ids = [source_output.prompt_token_ids for source_output in batch_source_outputs]
+            source_token_ids = [source_output.prompt_token_ids for source_output in source_outputs]
             
-            # 批量编辑kv cache
+            # 编辑kv cache
             target_kvcache, reused_map_indices, unreused_map_indices, sample_selected_token_indices = KVEditor.batch_kvedit(
-                batch_target_token_ids,
-                batch_source_token_ids,
-                batch_source_key_values
+                target_token_ids,
+                source_token_ids,
+                source_key_values
             )
             
-            # 批量partial compute
-            partial_batch_target_outputs = KVShareNewPipeline.partial_compute(
+            # partial compute
+            partial_target_outputs = KVShareNewPipeline.partial_compute(
                 pipeline.model,
                 SamplingParams(temperature=0.0, max_tokens=512),
-                all_target_prompts,
+                target_prompts,
                 reused_map_indices,
                 unreused_map_indices,
                 sample_selected_token_indices,
@@ -146,15 +140,13 @@ def partial_compute_qwen2(data_path, save_path, model_name="Qwen/Qwen2.5-7B-Inst
             )
 
             # 保存结果
-            for idx, item in enumerate(batch_items):
-                base_idx = idx * 2  # 因为每个item有2个输出
-                item["sim_top1"]["partial_output"] = partial_batch_target_outputs[base_idx].outputs[0].text
-                item["reused_top1"]["partial_output"] = partial_batch_target_outputs[base_idx + 1].outputs[0].text
-                item["target_text"]["full_output"] = full_compute_target_outputs[base_idx].outputs[0].text
-                save_data.append(item)
+            item["sim_top1"]["partial_output"] = partial_target_outputs[0].outputs[0].text
+            item["reused_top1"]["partial_output"] = partial_target_outputs[1].outputs[0].text
+            item["target_text"]["full_output"] = full_compute_target_outputs[0].outputs[0].text
+            save_data.append(item)
+            
         except Exception as e:
-            print(f"处理批次时出错: {str(e)}")
-            # print(f"错误详情: {traceback.format_exc()}")
+            print(f"处理项目时出错: {str(e)}")
             with open(save_path,"w") as f:
                 json.dump(save_data+has_run_data,f,indent=4,ensure_ascii=False)
             continue
