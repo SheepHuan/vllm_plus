@@ -264,6 +264,8 @@ class LocalOrDistributedWorkerBase(WorkerBase):
     ) -> Tuple[BroadcastableModelInput, WorkerInput, Dict[str, torch.Tensor]]:
         """ Get the driver input and broadcast it to other workers.  """
         assert self.is_driver_worker
+        # NOTE 这里我们修改我们的batch时的KV Cache
+        
 
         worker_input: WorkerInput = self.prepare_worker_input(
             execute_model_req=execute_model_req)

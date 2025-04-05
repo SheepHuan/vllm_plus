@@ -283,14 +283,14 @@ class KVEditor:
         # 初始化结果列表
         batch_reused_map_indices = []    # 存储所有被复用的token位置
         batch_unreused_map_indices = []  # 存储所有未被复用的token位置
-        sample_selected_token_indices = []  # 存储每个样本需要重新计算的token数量
+        batch_sample_selected_token_indices = []  # 存储每个请求prefill阶段采样的token索引
+        batch_target_slice_list = []
         
-        # 逐个处理每个样本
         for idx,(source_token_ids,target_token_ids) in enumerate(zip(batch_sources_token_ids,batch_targets_token_ids)):
             # 计算当前样本的文本差异
             diff_report = KVEditor.find_text_differences(source_token_ids,target_token_ids,window_size=window_size)
             reused_map_indices = []
-            
+            batch_target_slice_list.append((batch_target_prefix_len,batch_target_prefix_len+len(target_token_ids)))
             # 处理每个移动操作
             for move in diff_report["moves"]:
                 # 调整源位置和目标位置的索引，加上之前样本的长度
@@ -307,7 +307,7 @@ class KVEditor:
                 # 复制对应位置的kv缓存
                 try:
                     target_kvcache[:, :, to_position[0]:to_position[1]+1, :] = source_kvcache[:, :, from_position[0]:from_position[1]+1, :]
-                    reused_map_indices.extend(list(range(to_position[0],to_position[1]+1)))
+                    reused_map_indices.extend(list(range(to_position[0]-batch_target_prefix_len,to_position[1]+1-batch_target_prefix_len)))
                 except Exception as e:
                     print(e)
                     print(from_position,to_position)
@@ -315,11 +315,11 @@ class KVEditor:
             
             # 去重并计算未被复用的位置
             reused_map_indices = list(set(reused_map_indices))
-            unreused_map_indices = list(set(range(batch_target_prefix_len,batch_target_prefix_len+len(target_token_ids))) - set(reused_map_indices))
+            unreused_map_indices = list(set(range(0,len(target_token_ids))) - set(reused_map_indices))
             
             # 确保最后一个token总是被重新计算
-            if len(target_token_ids)-1 + batch_target_prefix_len not in unreused_map_indices:
-                unreused_map_indices.append(len(target_token_ids)-1 + batch_target_prefix_len)
+            if len(target_token_ids)-1  not in unreused_map_indices:
+                unreused_map_indices.append(len(target_token_ids)-1)
             
             # 更新累积长度
             batch_source_prefix_len += len(source_token_ids)
@@ -331,17 +331,11 @@ class KVEditor:
             batch_unreused_map_indices.append(unreused_map_indices)
             
             # 计算需要重新计算的token数量的累积和
-            if idx == 0:
-                sample_selected_token_indices.append(len(unreused_map_indices)-1)
-            else:
-                sample_selected_token_indices.append(len(unreused_map_indices)-1 + sample_selected_token_indices[-1] + 1)
-        
-
+            
+            batch_sample_selected_token_indices.append(len(unreused_map_indices)-1)
+    
         # 合并所有样本的结果
-        batch_reused_map_indices = sum(batch_reused_map_indices,[])
-        batch_unreused_map_indices = sum(batch_unreused_map_indices,[])
-        
-        return target_kvcache,batch_reused_map_indices,batch_unreused_map_indices,sample_selected_token_indices
+        return target_kvcache,batch_reused_map_indices,batch_unreused_map_indices,batch_sample_selected_token_indices,batch_target_slice_list
     
     def test_acc():
         # Test data setup

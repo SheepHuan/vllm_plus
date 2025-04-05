@@ -1566,6 +1566,17 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
     def vocab_size(self) -> int:
         return self.model_config.get_vocab_size()
 
+class KVSharePreillMetadata:
+    """
+    This class is used to store the metadata for the prefill phase.
+    """
+    batch_reused_map_indices = []
+    batch_unreused_map_indices = []
+    batch_sample_selected_token_indices = []
+    # batch_prompt_lengths = []
+    batch_kvcache = []
+    batch_target_slice_list = []
+    batch_current_request_ids=[]
 
 class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
     """
@@ -1574,6 +1585,11 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
     _model_input_cls: Type[ModelInputForGPUWithSamplingMetadata] = (
         ModelInputForGPUWithSamplingMetadata)
     _builder_cls: Type[ModelInputForGPUBuilder] = ModelInputForGPUBuilder
+    
+    #
+    _hack_kv_tables = dict()
+    _hack_kv_seq = []
+    _kvshare_preill_metadata = KVSharePreillMetadata()
 
     def make_model_input_from_broadcasted_tensor_dict(
         self,
@@ -1618,6 +1634,63 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             sampling_metadata = None
         is_prompt = (seq_group_metadata_list[0].is_prompt
                      if seq_group_metadata_list else None)
+        if self.model.model.cache_fuse_metadata["collect"] and model_input.attn_metadata.prefill_metadata:
+            self._hack_kv_seq = []
+            for seq_group_metadata in seq_group_metadata_list:
+                # NOTE这里需要确认那些请求处于prefill阶段，那些请求处于decode阶段
+                if seq_group_metadata.is_prompt:
+                    # prompt_hash_value = hash(tuple(seq_group_metadata.seq_data[int(seq_group_metadata.request_id)].prompt_token_ids))
+                    prompt_len = len((seq_group_metadata.seq_data[int(seq_group_metadata.request_id)].prompt_token_ids))
+                    self._hack_kv_seq.append((int(seq_group_metadata.request_id),prompt_len))
+        if self.model.model.cache_fuse_metadata["check"] and model_input.attn_metadata.prefill_metadata:
+            # 先定位这次是那些prefill请求
+            prefill_req_ids = []
+            for seq_group_metadata in seq_group_metadata_list:
+                if seq_group_metadata.is_prompt:
+                    prefill_req_ids.append(int(seq_group_metadata.request_id))
+            # 然后根据这些请求的kvcache
+            batch_requests_prompt_prefix_len = 0
+            batch_requests_unresued_prefix_len = 0
+            additional_map_indices = None
+            selected_token_indices = None
+            old_kv_map_indices = None
+            reused_kvcache = []
+            
+            for req_id in prefill_req_ids:
+                index = self._kvshare_preill_metadata.batch_current_request_ids.index(req_id)
+                slice_list = self._kvshare_preill_metadata.batch_target_slice_list[index]
+                
+                # 计算additional_map_indices
+                if additional_map_indices is None:
+                    additional_map_indices = torch.tensor(self._kvshare_preill_metadata.batch_unreused_map_indices[index],device=self.device).to(torch.int64)
+                else:
+                    additional_map_indices = torch.cat([additional_map_indices,
+                                                        torch.tensor(self._kvshare_preill_metadata.batch_unreused_map_indices[index],device=self.device).to(torch.int64)+
+                                                        batch_requests_prompt_prefix_len])
+                # 计算selected_token_indices
+                if selected_token_indices is None:
+                    selected_token_indices = torch.tensor([self._kvshare_preill_metadata.batch_sample_selected_token_indices[index]],device=self.device).to(torch.int64)
+                else:
+                    selected_token_indices = torch.cat([selected_token_indices,
+                                                        torch.tensor([self._kvshare_preill_metadata.batch_sample_selected_token_indices[index]],device=self.device).to(torch.int64)+
+                                                       batch_requests_unresued_prefix_len])
+                # 计算old_kv_map_indices
+                if old_kv_map_indices is None:
+                    old_kv_map_indices = torch.tensor(self._kvshare_preill_metadata.batch_reused_map_indices[index],device=self.device).to(torch.int64)
+                else:
+                    old_kv_map_indices = torch.cat([old_kv_map_indices,
+                                                    torch.tensor(self._kvshare_preill_metadata.batch_reused_map_indices[index],device=self.device).to(torch.int64)+
+                                                    batch_requests_prompt_prefix_len])
+                batch_requests_prompt_prefix_len += slice_list[1]-slice_list[0]
+                batch_requests_unresued_prefix_len=additional_map_indices.numel()
+                # 计算reused_kvcache
+                reused_kvcache.append(self._kvshare_preill_metadata.batch_kvcache[:,:,slice_list[0]:slice_list[1],:])
+            
+            self.model.model.cache_fuse_metadata['additional_map_indices'] = additional_map_indices
+            self.model.model.cache_fuse_metadata['selected_token_indices'] = selected_token_indices
+            self.model.model.cache_fuse_metadata['old_kv_map_indices'] = old_kv_map_indices
+            self.model.model.old_kvs= torch.cat(reused_kvcache,dim=2)
+        
         return dataclasses.replace(model_input,
                                    sampling_metadata=sampling_metadata,
                                    is_prompt=is_prompt,
@@ -1706,6 +1779,27 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                     **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
                                                  device=self.device),
                     **seqlen_agnostic_kwargs)
+            
+            # NOTE
+            if self.model.model.cache_fuse_metadata['collect'] and model_input.attn_metadata.prefill_metadata:
+                batch_seq_kv = [[] for _ in range(len(self._hack_kv_seq))]
+                batch_seq_prefix_len = 0
+                batch_seq_slice_list = []
+                for (request_id,seq_len) in self._hack_kv_seq:
+                    batch_seq_slice_list.append((batch_seq_prefix_len,batch_seq_prefix_len+seq_len))
+                    batch_seq_prefix_len += seq_len
+                llm_layer_num = len(self.model.model.layers)
+                for layer_idx in range(llm_layer_num):
+                    hack_kv = self.model.model.layers[layer_idx].self_attn.hack_kv
+                    for batch_idx, (start_token_idx,end_token_idx) in enumerate(batch_seq_slice_list):
+                        batch_seq_kv[batch_idx].append([
+                            hack_kv[0][start_token_idx:end_token_idx,:],
+                            hack_kv[1][start_token_idx:end_token_idx,:]
+                        ])
+                    self.model.model.layers[layer_idx].self_attn.hack_kv = []
+                for batch_idx, (request_id,seq_len) in enumerate(self._hack_kv_seq):
+                    self._hack_kv_tables[request_id] = batch_seq_kv[batch_idx]
+                self._hack_kv_seq = []
 
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
@@ -1747,16 +1841,15 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         #                                    model_input.sampling_metadata)
 
         if self.model.model.cache_fuse_metadata['check']:
-            #import pdb
-            #pdb.set_trace()
             temp_data = model_input.sampling_metadata.selected_token_indices.clone()
             model_input.sampling_metadata.selected_token_indices = torch.tensor(self.model.model.cache_fuse_metadata['selected_token_indices']).to(temp_data.device).to(temp_data.dtype)
             self.model.model.cache_fuse_metadata['check'] = False
-            #pdb.set_trace()
             logits = self.model.compute_logits(hidden_or_intermediate_states, model_input.sampling_metadata)
-            # model_input.sampling_metadata.selected_token_indices = temp_data
+            
         else:
             logits = self.model.compute_logits(hidden_or_intermediate_states, model_input.sampling_metadata)
+        
+        
         
         if not self.is_driver_worker:
             return []

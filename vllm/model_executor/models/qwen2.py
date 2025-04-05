@@ -201,8 +201,7 @@ class Qwen2Attention(nn.Module):
             else:
                 # NOTE VLLM在批处理的时候可能会循环调用这个
                 if len(self.hack_kv)!=0:
-                    self.hack_kv[0] = torch.concat([self.hack_kv[0],k.clone()],dim=0)
-                    self.hack_kv[1] = torch.concat([self.hack_kv[1],v.clone()],dim=0)
+                    self.hack_kv = [k.clone(),v.clone()]
                 else:
                     self.hack_kv = [k.clone(), v.clone()]
 
