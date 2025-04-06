@@ -1577,6 +1577,11 @@ class KVSharePreillMetadata:
     batch_kvcache = []
     batch_target_slice_list = []
     batch_current_request_ids=[]
+    batch_prefilled_request_ids=[]
+    
+    # 0: full compute
+    # 1: partial compute
+    is_partial_compute = False
 
 class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
     """
@@ -1642,8 +1647,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                     # prompt_hash_value = hash(tuple(seq_group_metadata.seq_data[int(seq_group_metadata.request_id)].prompt_token_ids))
                     prompt_len = len((seq_group_metadata.seq_data[int(seq_group_metadata.request_id)].prompt_token_ids))
                     self._hack_kv_seq.append((int(seq_group_metadata.request_id),prompt_len))
-        if self.model.model.cache_fuse_metadata["check"] and model_input.attn_metadata.prefill_metadata:
+        if model_input.attn_metadata.prefill_metadata and self._kvshare_preill_metadata.is_partial_compute:
             # 先定位这次是那些prefill请求
+            self.model.model.cache_fuse_metadata["check"]  = True
             prefill_req_ids = []
             for seq_group_metadata in seq_group_metadata_list:
                 if seq_group_metadata.is_prompt:
@@ -1655,7 +1661,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             selected_token_indices = None
             old_kv_map_indices = None
             reused_kvcache = []
-            
+            # self._kvshare_preill_metadata.batch_prefilled_request_ids.extend(prefill_req_ids)
             for req_id in prefill_req_ids:
                 index = self._kvshare_preill_metadata.batch_current_request_ids.index(req_id)
                 slice_list = self._kvshare_preill_metadata.batch_target_slice_list[index]
@@ -1689,7 +1695,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             self.model.model.cache_fuse_metadata['additional_map_indices'] = additional_map_indices
             self.model.model.cache_fuse_metadata['selected_token_indices'] = selected_token_indices
             self.model.model.cache_fuse_metadata['old_kv_map_indices'] = old_kv_map_indices
-            self.model.model.old_kvs= torch.cat(reused_kvcache,dim=2)
+            self.model.model.old_kvs= torch.cat(reused_kvcache,dim=2).to(self.device)
+        else:
+            self.model.model.cache_fuse_metadata['check'] = False
         
         return dataclasses.replace(model_input,
                                    sampling_metadata=sampling_metadata,
@@ -1793,8 +1801,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                     hack_kv = self.model.model.layers[layer_idx].self_attn.hack_kv
                     for batch_idx, (start_token_idx,end_token_idx) in enumerate(batch_seq_slice_list):
                         batch_seq_kv[batch_idx].append([
-                            hack_kv[0][start_token_idx:end_token_idx,:],
-                            hack_kv[1][start_token_idx:end_token_idx,:]
+                            hack_kv[0][start_token_idx:end_token_idx,:].detach().cpu(),
+                            hack_kv[1][start_token_idx:end_token_idx,:].detach().cpu()
                         ])
                     self.model.model.layers[layer_idx].self_attn.hack_kv = []
                 for batch_idx, (request_id,seq_len) in enumerate(self._hack_kv_seq):
@@ -1842,8 +1850,21 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
         if self.model.model.cache_fuse_metadata['check']:
             temp_data = model_input.sampling_metadata.selected_token_indices.clone()
-            model_input.sampling_metadata.selected_token_indices = torch.tensor(self.model.model.cache_fuse_metadata['selected_token_indices']).to(temp_data.device).to(temp_data.dtype)
+            model_input.sampling_metadata.selected_token_indices = self.model.model.cache_fuse_metadata['selected_token_indices'].clone().to(temp_data.device).to(temp_data.dtype)
             self.model.model.cache_fuse_metadata['check'] = False
+            
+            # 需要确认所有的当前请求都已经完成才能设置check为False
+            # if len(self._kvshare_preill_metadata.batch_prefilled_request_ids) == len(self._kvshare_preill_metadata.batch_current_request_ids):
+            #     self.model.model.cache_fuse_metadata['check'] = False
+            #     self._kvshare_preill_metadata.batch_prefilled_request_ids = []
+            #     self._kvshare_preill_metadata.batch_current_request_ids = []
+            #     self._kvshare_preill_metadata.batch_kvcache = []
+            #     self._kvshare_preill_metadata.batch_target_slice_list = []
+            #     self._kvshare_preill_metadata.batch_sample_selected_token_indices = []
+            #     self._kvshare_preill_metadata.batch_reused_map_indices = []
+            #     self._kvshare_preill_metadata.batch_unreused_map_indices = []
+            #     # self._kvshare_preill_metadata.batch_prompt_lengths = []
+            self.model.model.old_kvs = self.model.model.old_kvs.to("cpu")
             logits = self.model.compute_logits(hidden_or_intermediate_states, model_input.sampling_metadata)
             
         else:

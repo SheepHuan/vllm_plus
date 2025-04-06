@@ -414,7 +414,7 @@ class Qwen2Model(nn.Module):
     
             
         for i in range(self.start_layer, self.end_layer):
-            if self.cache_fuse_metadata["check"]:
+            if self.cache_fuse_metadata["check"] :
                 if i in self.cache_fuse_metadata["check_layers"]:
                     temp_status = 1 # check this layer
                     self.cache_fuse_metadata["check_layer"] = self.cache_fuse_metadata["check_layers"][check_layer_idx]

@@ -40,105 +40,120 @@ llama3_template_text = "<|begin_of_text|><|start_header_id|>system<|end_header_i
 
 OPUS_KVCACHE_DIR="examples/pipeline/kvcache/opus"
 
-def generate_output_data(input_path: str, output_path: str, model_name = "Qwen/Qwen2.5-7B-Instruct", batch_size=4):
+def generate_output_data(input_path: str, output_path: str, model_name = "Qwen/Qwen2.5-7B-Instruct", batch_size=4, max_model_len=8192,max_generate_len=512):
     device = "cuda:0"
-    pipeline = KVShareNewPipeline(model_name, device)
+    pipeline = KVShareNewPipeline(model_name, device, max_model_len)
     tokenizer = pipeline.model.get_tokenizer()
+    meteor_metric = evaluate.load('meteor')
     
+    # 加载数据
     with open(input_path, "r") as f:
-        data = json.load(f)
-    save_data = []
+        dataset = json.load(f)
     
-    all_data = data["all_translations"]
-    similar_pairs = data["similar_pairs"]
+    all_translations = dataset["all_translations"]
+    similar_pairs = dataset["similar_pairs"]
+    # 过滤相似度过高的样本
     similar_pairs = [pair for pair in similar_pairs if pair["reused_top1_w31"]["similarity"] < 0.9]
+    
+    # 检查是否存在已处理的数据
+    processed_pairs = []
     if os.path.exists(output_path):
-        profile_data = json.load(open(output_path,"r"))["similar_pairs"]
-        similar_pairs = [pair for pair in similar_pairs if pair["id"] not in profile_data]
-    else:
-        profile_data = []
+        processed_pairs = []
     
     print(f"处理后样本数量: {len(similar_pairs)}")
-    similar_pairs = random.sample(similar_pairs, min(len(similar_pairs),3000))
+    # 随机采样样本
+    # similar_pairs = random.sample(similar_pairs, min(len(similar_pairs), 400))
     
-    meteor = evaluate.load('meteor')
-    save_data = []
-
+    processed_results = []
+    
     # 批量处理数据
-    for i in tqdm(range(0, len(similar_pairs), batch_size), desc="Processing batches"):
+    for batch_start in tqdm(range(0, len(similar_pairs), batch_size), desc="Processing batches"):
         try:
-            batch_items = similar_pairs[i:i + batch_size]
+            batch_items = similar_pairs[batch_start:batch_start + batch_size]
             
-            # 准备所有prompt
+            # 准备批次数据
             batch_target_prompts = []
             batch_source_prompts = []
-            batch_answers = []
+            batch_references = []
+            valid_batch_items = []
             
             for item in batch_items:
-                question = all_data[str(item["id"])]["zh"]
-                answer = all_data[str(item["id"])]["en"]
-                source_question = all_data[str(item["reused_top1_w31"]["id"])]["zh"]
+                source_text = all_translations[str(item["id"])]["zh"]
+                target_text = all_translations[str(item["id"])]["en"]
+                reused_source_text = all_translations[str(item["reused_top1_w31"]["id"])]["zh"]
                 
-                batch_target_prompts.append(template.format(text=question))
-                batch_source_prompts.append(template.format(text=source_question))
-                batch_answers.append(answer)
+                # 检查token长度
+                source_tokens = tokenizer.encode(template.format(text=source_text))
+                reused_tokens = tokenizer.encode(template.format(text=reused_source_text))
+                
+                if len(source_tokens) <= max_model_len and len(reused_tokens) <= max_model_len:
+                    batch_target_prompts.append(template.format(text=source_text))
+                    batch_source_prompts.append(template.format(text=reused_source_text))
+                    batch_references.append(target_text)
+                    valid_batch_items.append(item)
             
-            # 编码token
-            batch_target_token_ids = [tokenizer.encode(prompt) for prompt in batch_target_prompts]
-            
+            if not valid_batch_items:
+                continue
+                     
             # 获取source的KV缓存
-            batch_source_key_values, batch_source_outputs, batch_source_req_ids = KVShareNewPipeline.get_kvcache_by_full_compute(
+            source_kv_cache, source_outputs, source_req_ids = KVShareNewPipeline.get_kvcache_by_full_compute(
                 pipeline.model,
-                SamplingParams(temperature=0, max_tokens=512),
+                SamplingParams(temperature=0, max_tokens=1),
                 batch_source_prompts
             )
             
-            batch_source_token_ids = [source_output.prompt_token_ids for source_output in batch_source_outputs]
-            max_request_id = sorted([int(req_output.request_id) for req_output in batch_source_outputs])[-1]
-            
+            source_token_ids = [output.prompt_token_ids for output in source_outputs]
+            max_request_id = max(int(req_output.request_id) for req_output in source_outputs)
             
             # 对不同window size进行处理
             for window_size in [6,12,24]:
                 # 批量KV编辑
-                target_kvcache, reused_map_indices, unreused_map_indices, sample_selected_token_indices, batch_target_slice_list = KVEditor.batch_kvedit(
-                    batch_target_token_ids,
-                    batch_source_token_ids,
-                    batch_source_key_values,
+                target_kv_cache, reused_indices, unreused_indices, selected_tokens, target_slices = KVEditor.batch_kvedit(
+                    [tokenizer.encode(prompt) for prompt in batch_target_prompts],
+                    source_token_ids,
+                    source_kv_cache,
                     window_size=window_size
                 )
-                guess_target_req_ids = [max_request_id+1+idx for idx in range(len(batch_target_prompts))]
+                
+                target_req_ids = [max_request_id + 1 + idx for idx in range(len(batch_target_prompts))]
+                
                 # 批量partial计算
-                batch_target_outputs = KVShareNewPipeline.partial_compute(
+                target_outputs = KVShareNewPipeline.partial_compute(
                     pipeline.model,
-                    SamplingParams(temperature=0, max_tokens=512),
+                    SamplingParams(temperature=0, max_tokens=max_generate_len),
                     batch_target_prompts,
-                    target_kvcache,
-                    reused_map_indices,
-                    unreused_map_indices,
-                    sample_selected_token_indices,
-                    batch_target_slice_list,
-                    guess_target_req_ids
+                    target_kv_cache,
+                    reused_indices,
+                    unreused_indices,
+                    selected_tokens,
+                    target_slices,
+                    target_req_ids
                 )
-                max_request_id = sorted([int(req_output.request_id) for req_output in batch_target_outputs])[-1]
-                # 处理结果
-                for idx, item in enumerate(batch_items):
+                
+                max_request_id = max(int(req_output.request_id) for req_output in target_outputs)
+                
+                # 处理输出结果
+                for idx, item in enumerate(valid_batch_items):
                     try:
-                        partial_output = batch_target_outputs[idx].outputs[0].text
-                        item["reused_top1_w31"][f"output_w{window_size}"] = partial_output
-                        item["reused_top1_w31"][f"meteor_w{window_size}"] = meteor.compute(predictions=[partial_output], references=[batch_answers[idx]])
+                        generated_text = target_outputs[idx].outputs[0].text
+                        item["reused_top1_w31"][f"output_w{window_size}"] = generated_text
+                        item["reused_top1_w31"][f"meteor_w{window_size}"] = meteor_metric.compute(
+                            predictions=[generated_text], 
+                            references=[batch_references[idx]]
+                        )
                     except Exception as e:
                         print(f"处理输出结果时出错: {str(e)}")
                         continue
             
-            save_data.extend(batch_items)
+            processed_results.extend(valid_batch_items)
             
         except Exception as e:
             print(f"处理批次时出错: {str(e)}")
             traceback.print_exc()
             continue
             
-    data["similar_pairs"] = save_data + profile_data
-    json.dump(data, open(output_path, "w"), indent=4, ensure_ascii=False)
+    dataset["similar_pairs"] = processed_results + processed_pairs
+    json.dump(dataset, open(output_path, "w"), indent=4, ensure_ascii=False)
     
     
 def plot_bleu_acc(input_path: str, output_path: str):
@@ -719,7 +734,8 @@ if __name__ == "__main__":
     # pool.join()
     
     template = qwen_template
-    model_name = "Qwen/Qwen2.5-7B-Instruct-GPTQ-Int4"
+    model_name = "Qwen/Qwen2.5-32B-Instruct-GPTQ-Int4"
+    # model_name = "Qwen/Qwen2.5-1.5B-Instruct"
     # template = llama3_template_text
     # model_name = "LLM-Research/Meta-Llama-3.1-70B-Instruct-GPTQ-INT4"
     
@@ -733,7 +749,7 @@ if __name__ == "__main__":
     
     input_path = f"examples/dataset/data/opus/opus_dataset_en-zh_similar_docs_top50_250403_windows.json"
     output_path = f"examples/dataset/data/opus/opus_dataset_en-zh_similar_docs_top50_250405_windows_output_qwen2.5-32b.json"
-    generate_output_data(input_path,output_path,model_name=model_name,batch_size=32)
+    generate_output_data(input_path,output_path,model_name=model_name,batch_size=72,max_generate_len=512)
     
     # input_path = f"examples/dataset/data/opus/opus_dataset_en-zh_similar_docs_top50_250403_windows_output_qwen2.5-32b.json"
     # output_path = f"examples/dataset/data/opus/opus_dataset_en-zh_similar_docs_top50_250403_fc_output_qwen2.5-32b.json"
