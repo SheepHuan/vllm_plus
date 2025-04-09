@@ -286,6 +286,8 @@ class KVEditor:
         batch_sample_selected_token_indices = []  # 存储每个请求prefill阶段采样的token索引
         batch_target_slice_list = []
         
+        num_pad = 0
+        
         for idx,(source_token_ids,target_token_ids) in enumerate(zip(batch_sources_token_ids,batch_targets_token_ids)):
             # 计算当前样本的文本差异
             diff_report = KVEditor.find_text_differences(source_token_ids,target_token_ids,window_size=window_size)
@@ -301,6 +303,13 @@ class KVEditor:
                 to_position[0] += batch_target_prefix_len
                 to_position[1] += batch_target_prefix_len
 
+                
+                if  from_position[1] - from_position[0] >  num_pad*2:
+                    from_position[0] = from_position[0]+num_pad
+                    # from_position[1] = from_position[1]-num_pad
+                    to_position[0] = to_position[0]+num_pad
+                    # to_position[1] = to_position[1]-num_pad
+# 
                 if from_position[1]-from_position[0] != to_position[1]-to_position[0]:
                     print(from_position,to_position)
                     continue

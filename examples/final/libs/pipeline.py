@@ -122,7 +122,7 @@ class KVShareNewPipeline:
         # old_kv_map_indices = torch.tensor(reused_map_indices).to(device).to(torch.int64)
 
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["check"] = True
-        llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata['collect'] = False
+        llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata['collect'] = True
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["recomp_ratio"] = 0.0
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["use_additional_indices"] = True
 
@@ -133,6 +133,16 @@ class KVShareNewPipeline:
         llm_model.llm_engine.model_executor.driver_worker.model_runner._kvshare_preill_metadata.batch_kvcache = target_kvcache
         llm_model.llm_engine.model_executor.driver_worker.model_runner._kvshare_preill_metadata.batch_current_request_ids = guess_target_req_ids
         llm_model.llm_engine.model_executor.driver_worker.model_runner._kvshare_preill_metadata.is_partial_compute = True
+        
+        
+        num_layer = len(llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.layers)
+        for j in range(num_layer):
+            llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.layers[j].self_attn.hack_kv = []
+        
+        
+        # 清空缓存
+        llm_model.llm_engine.model_executor.driver_worker.model_runner._hack_kv_tables = dict()
+        
         outputs = llm_model.generate(batch_target_prompt,sampling_params,use_tqdm=False)
         
         
@@ -143,7 +153,25 @@ class KVShareNewPipeline:
         llm_model.llm_engine.model_executor.driver_worker.model_runner._kvshare_preill_metadata.batch_current_request_ids = []
         llm_model.llm_engine.model_executor.driver_worker.model_runner._kvshare_preill_metadata.batch_target_slice_list = []
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.old_kvs = [[None,None]] * len(llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.layers)  
+        llm_model.llm_engine.model_executor.driver_worker.model_runner._kvshare_preill_metadata.is_partial_compute = False
+        
+        
+        llm_layers = llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.layers
+        hack_kv_tables = llm_model.llm_engine.model_executor.driver_worker.model_runner._hack_kv_tables
+        keys = sorted(hack_kv_tables.keys())
+        batch_kvcache = []
+        for key in keys:
+            past_key_values = []
+            hack_kv = hack_kv_tables[key]
+            for j in range(num_layer):
+                temp_key_cache = hack_kv[j][0]
+                temp_value_cache = hack_kv[j][1]
+                past_key_values.append(torch.stack([temp_key_cache,temp_value_cache],dim=0))    
+            past_key_values = torch.stack(past_key_values,dim=0)
+            batch_kvcache.append(past_key_values)
+        batch_kvcache = torch.concat(batch_kvcache,dim=2)
+        
         torch.cuda.empty_cache()
-        return outputs
+        return outputs,batch_kvcache
     
     

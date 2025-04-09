@@ -95,6 +95,44 @@ class Qwen2MLP(nn.Module):
         x, _ = self.down_proj(x)
         return x
 
+# def do_blend(
+#         status: int,
+#         old_kv: List[torch.Tensor],
+#         cache_fuse_metadata: dict,
+#         query: torch.Tensor,
+#         key: torch.Tensor,
+#         value: torch.Tensor,
+#         attn_metadata: AttentionMetadata
+#     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, AttentionMetadata]:
+#         # if status in [1, 2]:
+#         #     # Huan: 预缓存的key和value的形状需要调整
+#         #     key_old = old_kv[0].view(-1, num_kv_heads, head_size)
+#         #     value_old = old_kv[1].view(-1, num_kv_heads, head_size)
+#         key_old = old_kv[0]
+#         value_old = old_kv[1]
+#         if status in [1]:
+#             # FIXME: 需要修改,防止出现additional_map_indices为空的情况
+#             if  cache_fuse_metadata["use_additional_indices"]:
+#                 top_indices = cache_fuse_metadata["additional_map_indices"]
+#                 cache_fuse_metadata["imp_indices"] = top_indices
+                
+#                 attn_metadata.query_start_loc = torch.cat([torch.tensor([0],device=cache_fuse_metadata['selected_token_indices'].device),cache_fuse_metadata['selected_token_indices']+1]).to(torch.int32)
+#                 attn_metadata.num_prefill_tokens = len(cache_fuse_metadata["additional_map_indices"])
+#                 # attn_metadata.max_query_len = max(cache_fuse_metadata["selected_token_indices"][1:]-cache_fuse_metadata["selected_token_indices"][:-1]).item()
+#                 # attn_metadata.prefill_metadata.num_prefill_tokens = len(cache_fuse_metadata["additional_map_indices"])
+#                 # attn_metadata.prefill_metadata.query_start_loc =  attn_metadata.query_start_loc.to(torch.int32)
+
+#         if status in [1]:
+#             imp_indices = cache_fuse_metadata["imp_indices"]
+#             query = query[imp_indices,:]
+            
+
+#         if status in [2]:
+#             imp_indices = cache_fuse_metadata["imp_indices"]
+#             key_old[imp_indices,:] = key 
+#             value_old[imp_indices,:] = value
+
+#         return query, key_old, value_old, attn_metadata
 
 class Qwen2Attention(nn.Module):
 
@@ -165,6 +203,7 @@ class Qwen2Attention(nn.Module):
                               attn_type=attn_type)
         # 逻辑需要修改
         self.hack_kv = []
+        self.hack_attn = None
 
     def forward(
         self,
@@ -180,12 +219,7 @@ class Qwen2Attention(nn.Module):
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         
         # Jiayi: modified start，设置一个占位Q，恢复缓存的K的当前位置编码
-        if status in [1,2]:
-            if cache_fuse_metadata["fake_q"] is None:
-                cache_fuse_metadata['fake_q'] = torch.rand_like(q)
-            _, old_kv[0] = self.rotary_emb(cache_fuse_metadata['org_pos'],
-                                        cache_fuse_metadata['fake_q'],
-                                        old_kv[0])
+        
         if cache_fuse_metadata['collect'] and attn_metadata.prefill_metadata:
             
             if cache_fuse_metadata["use_additional_indices"]:
@@ -200,17 +234,24 @@ class Qwen2Attention(nn.Module):
                     self.hack_kv = [key_old,value_old]
             else:
                 # NOTE VLLM在批处理的时候可能会循环调用这个
-                if len(self.hack_kv)!=0:
-                    self.hack_kv = [k.clone(),v.clone()]
-                else:
-                    self.hack_kv = [k.clone(), v.clone()]
+                
+                self.hack_kv = [k.clone(),v.clone()]
+                # self.hack_attn = [attn_metadata.clone()]
+        if status in [1,2]:
+            if cache_fuse_metadata["fake_q"] is None:
+                cache_fuse_metadata['fake_q'] = torch.rand_like(q)
+            _, old_kv[0] = self.rotary_emb(cache_fuse_metadata['org_pos'],
+                                        cache_fuse_metadata['fake_q'],
+                                        old_kv[0])    
+                  
 
         
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata,
-                                status=status,
-                                cache_fuse_metadata=cache_fuse_metadata,
-                                old_kv=old_kv)
+        
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata,status,
+                                cache_fuse_metadata,old_kv)
+        if cache_fuse_metadata['collect'] and attn_metadata.prefill_metadata:    
+            self.hack_attn = attn_output.clone()
         output, _ = self.o_proj(attn_output)
         return output
 

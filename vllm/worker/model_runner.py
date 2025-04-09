@@ -1696,6 +1696,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             self.model.model.cache_fuse_metadata['selected_token_indices'] = selected_token_indices
             self.model.model.cache_fuse_metadata['old_kv_map_indices'] = old_kv_map_indices
             self.model.model.old_kvs= torch.cat(reused_kvcache,dim=2).to(self.device)
+            # model_input.attn_metadata.query_start_loc = torch.cat([torch.tensor([0],device=self.device),selected_token_indices+1])
         else:
             self.model.model.cache_fuse_metadata['check'] = False
         
@@ -1853,17 +1854,6 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_input.sampling_metadata.selected_token_indices = self.model.model.cache_fuse_metadata['selected_token_indices'].clone().to(temp_data.device).to(temp_data.dtype)
             self.model.model.cache_fuse_metadata['check'] = False
             
-            # 需要确认所有的当前请求都已经完成才能设置check为False
-            # if len(self._kvshare_preill_metadata.batch_prefilled_request_ids) == len(self._kvshare_preill_metadata.batch_current_request_ids):
-            #     self.model.model.cache_fuse_metadata['check'] = False
-            #     self._kvshare_preill_metadata.batch_prefilled_request_ids = []
-            #     self._kvshare_preill_metadata.batch_current_request_ids = []
-            #     self._kvshare_preill_metadata.batch_kvcache = []
-            #     self._kvshare_preill_metadata.batch_target_slice_list = []
-            #     self._kvshare_preill_metadata.batch_sample_selected_token_indices = []
-            #     self._kvshare_preill_metadata.batch_reused_map_indices = []
-            #     self._kvshare_preill_metadata.batch_unreused_map_indices = []
-            #     # self._kvshare_preill_metadata.batch_prompt_lengths = []
             self.model.model.old_kvs = self.model.model.old_kvs.to("cpu")
             logits = self.model.compute_logits(hidden_or_intermediate_states, model_input.sampling_metadata)
             

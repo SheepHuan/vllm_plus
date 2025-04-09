@@ -655,6 +655,10 @@ class FlashAttentionImpl(AttentionImpl):
         NOTE: It in-place updates the output tensor.
         """
         # NOTE(woosuk): FlashAttention does not support FP8 KV cache.
+        # num_tokens, hidden_size = query.shape
+        query = query.view(-1, self.num_heads, self.head_size)
+        key = key.view(-1, self.num_kv_heads, self.head_size)
+        value = value.view(-1, self.num_kv_heads, self.head_size)
         assert k_scale == 1.0 and v_scale == 1.0, (
             "key/v_scale is not supported in FlashAttention.")
 
@@ -714,11 +718,73 @@ class FlashAttentionImpl(AttentionImpl):
         (num_prefill_query_tokens, num_prefill_kv_tokens,
         num_decode_query_tokens) = \
             get_num_prefill_decode_query_kv_tokens(attn_metadata, attn_type)
+
+         # Injection for CacheBlend
+        if key.shape[0] > query.shape[0] and num_prefill_query_tokens!=0:
+            # Cache blend forward
+            num_kv_tokens = key.shape[0]
+            assert value.shape[0] == num_kv_tokens
+            assert query.shape[0] == attn_metadata.num_prefill_tokens
+
+            # In the cacheblend case, prefill_meta must be not None
+            prefill_meta = attn_metadata
+            assert prefill_meta is not None
+
+            if (kv_cache is None or prefill_meta.block_tables is None
+                    or prefill_meta.block_tables.numel() == 0):
+                # normal attention
+                # When block_tables are not filled, it means q and k are the
+                # prompt, and they have the same length.
+                prefill_output = flash_attn_varlen_func(
+                    q=query,
+                    k=key,
+                    v=value,
+                    cu_seqlens_q=prefill_meta.query_start_loc,
+                    cu_seqlens_k=prefill_meta.seq_start_loc,
+                    max_seqlen_q=prefill_meta.max_prefill_seq_len,
+                    # max_seqlen_q=prefill_meta.max_query_len,
+                    max_seqlen_k=prefill_meta.max_prefill_seq_len,
+                    softmax_scale=self.scale,
+                    causal=True,
+                    window_size=self.sliding_window,
+                    alibi_slopes=self.alibi_slopes,
+                    softcap=self.logits_soft_cap,
+                )
+            else:
+                # prefix-enabled attention
+                assert prefill_meta.seq_lens is not None
+                max_seq_len = max(prefill_meta.seq_lens)
+                prefill_output = flash_attn_varlen_func(  # noqa
+                    q=query,
+                    k=key_cache,
+                    v=value_cache,
+                    cu_seqlens_q=prefill_meta.query_start_loc,
+                    max_seqlen_q=prefill_meta.max_query_len,
+                    cu_seqlens_k=prefill_meta.seq_start_loc,
+                    max_seqlen_k=max_seq_len,
+                    softmax_scale=self.scale,
+                    causal=True,
+                    alibi_slopes=self.alibi_slopes,
+                    block_table=prefill_meta.block_tables,
+                    softcap=self.logits_soft_cap,
+                )
+
+            assert prefill_output is not None
+            return prefill_output.view(attn_metadata.num_prefill_tokens, self.num_heads, self.head_size)
+        # End of injection
+        
+        
         decode_query = query[num_prefill_query_tokens:]
         decode_output = output[num_prefill_query_tokens:]
         # QKV for prefill.
         query = query[:num_prefill_query_tokens]
         prefill_output = output[:num_prefill_query_tokens]
+        key = key[:num_prefill_query_tokens]
+        value = value[:num_prefill_query_tokens]
+        
+        
+        
+        
         assert query.shape[0] == num_prefill_query_tokens
         assert decode_query.shape[0] == num_decode_query_tokens
 

@@ -62,7 +62,7 @@ def generate_output_data(input_path: str, output_path: str, model_name = "Qwen/Q
     
     print(f"处理后样本数量: {len(similar_pairs)}")
     # 随机采样样本
-    # similar_pairs = random.sample(similar_pairs, min(len(similar_pairs), 400))
+    # similar_pairs = random.sample(similar_pairs, 400)
     
     processed_results = []
     
@@ -80,8 +80,8 @@ def generate_output_data(input_path: str, output_path: str, model_name = "Qwen/Q
             for item in batch_items:
                 source_text = all_translations[str(item["id"])]["zh"]
                 target_text = all_translations[str(item["id"])]["en"]
+                # reused_source_text = source_text
                 reused_source_text = all_translations[str(item["reused_top1_w31"]["id"])]["zh"]
-                
                 # 检查token长度
                 source_tokens = tokenizer.encode(template.format(text=source_text))
                 reused_tokens = tokenizer.encode(template.format(text=reused_source_text))
@@ -102,11 +102,17 @@ def generate_output_data(input_path: str, output_path: str, model_name = "Qwen/Q
                 batch_source_prompts
             )
             
+            real_target_kv_cache,real_target_outputs,real_target_req_ids = KVShareNewPipeline.get_kvcache_by_full_compute(
+                pipeline.model,
+                SamplingParams(temperature=0, max_tokens=1),
+                batch_target_prompts
+            )
+            
             source_token_ids = [output.prompt_token_ids for output in source_outputs]
-            max_request_id = max(int(req_output.request_id) for req_output in source_outputs)
+            max_request_id = max(int(req_output.request_id) for req_output in real_target_outputs)
             
             # 对不同window size进行处理
-            for window_size in [6,12,24]:
+            for window_size in [1,3,7,11,15]:
                 # 批量KV编辑
                 target_kv_cache, reused_indices, unreused_indices, selected_tokens, target_slices = KVEditor.batch_kvedit(
                     [tokenizer.encode(prompt) for prompt in batch_target_prompts],
@@ -114,11 +120,19 @@ def generate_output_data(input_path: str, output_path: str, model_name = "Qwen/Q
                     source_kv_cache,
                     window_size=window_size
                 )
+                # merge reused_indices
+                reused_token_index_each_item = []
+                unreused_token_index_each_item = []
+                # reused_prefix_len = 0
+                for idx, (resued_item_indices,unreused_item_indices) in enumerate(zip(reused_indices,unreused_indices)):
+                    reused_token_index_each_item.append(torch.tensor(resued_item_indices) + target_slices[idx][0])
+                    unreused_token_index_each_item.append(torch.tensor(unreused_item_indices) + target_slices[idx][0])
+
                 
                 target_req_ids = [max_request_id + 1 + idx for idx in range(len(batch_target_prompts))]
                 
                 # 批量partial计算
-                target_outputs = KVShareNewPipeline.partial_compute(
+                target_outputs,batch_partial_kvcache = KVShareNewPipeline.partial_compute(
                     pipeline.model,
                     SamplingParams(temperature=0, max_tokens=max_generate_len),
                     batch_target_prompts,
@@ -141,6 +155,25 @@ def generate_output_data(input_path: str, output_path: str, model_name = "Qwen/Q
                             predictions=[generated_text], 
                             references=[batch_references[idx]]
                         )
+                        key_error_reused = torch.abs(real_target_kv_cache[:,0,reused_token_index_each_item[idx],:] - batch_partial_kvcache[:,0,reused_token_index_each_item[idx],:])
+                        value_error_reused = torch.abs(real_target_kv_cache[:,1,reused_token_index_each_item[idx],:] - batch_partial_kvcache[:,1,reused_token_index_each_item[idx],:])
+                
+                        # # 保存reused位置的KV误差
+                        item["reused_top1_w31"][f"key_error_layer_reused_w{window_size}"] = torch.mean(key_error_reused[:,:,:],dim=[1,2]).cpu().numpy().tolist()
+                        item["reused_top1_w31"][f"value_error_layer_reused_w{window_size}"] = torch.mean(value_error_reused[:,:,:],dim=[1,2]).cpu().numpy().tolist()
+                        item["reused_top1_w31"][f"key_error_token_reused_w{window_size}"] = torch.mean(key_error_reused[:,:,:],dim=[0,2]).cpu().numpy().tolist()
+                        item["reused_top1_w31"][f"value_error_token_reused_w{window_size}"] = torch.mean(value_error_reused[:,:,:],dim=[0,2]).cpu().numpy().tolist()
+                        
+                        # 计算unreused位置的KV误差
+                        key_error_unreused = torch.abs(real_target_kv_cache[:,0,unreused_token_index_each_item[idx],:] - batch_partial_kvcache[:,0,unreused_token_index_each_item[idx],:])
+                        value_error_unreused = torch.abs(real_target_kv_cache[:,1,unreused_token_index_each_item[idx],:] - batch_partial_kvcache[:,1,unreused_token_index_each_item[idx],:])
+
+                        # # 保存unreused位置的KV误差
+                        item["reused_top1_w31"][f"key_error_layer_unreused_w{window_size}"] = torch.mean(key_error_unreused[:,:,:],dim=[1,2]).cpu().numpy().tolist()
+                        item["reused_top1_w31"][f"value_error_layer_unreused_w{window_size}"] = torch.mean(value_error_unreused[:,:,:],dim=[1,2]).cpu().numpy().tolist()
+                        item["reused_top1_w31"][f"key_error_token_unreused_w{window_size}"] = torch.mean(key_error_unreused[:,:,:],dim=[0,2]).cpu().numpy().tolist()
+                        item["reused_top1_w31"][f"value_error_token_unreused_w{window_size}"] = torch.mean(value_error_unreused[:,:,:],dim=[0,2]).cpu().numpy().tolist()
+                        
                     except Exception as e:
                         print(f"处理输出结果时出错: {str(e)}")
                         continue
@@ -706,100 +739,827 @@ def plot_similarity_vs_meteor(input_path: str, save_path: str = "examples/pipeli
                 print(f"  样本数量: {count}")
                 print(f"  平均分数: {mean:.4f} ± {std:.4f}")
 
+def plot_zero_score_kv_error(input_path: str, save_path: str = "examples/pipeline/images/zero_score_kv_error.png", window_size: int = 20):
+    """可视化分数为0的样本的KV误差分布
+    
+    Args:
+        input_path: 输入数据文件路径
+        save_path: 保存图片的路径
+        window_size: 窗口大小
+    """
+    with open(input_path, "r") as f:
+        data = json.load(f)
+    
+    # 收集分数为0的样本的KV误差
+    key_error_reused = []
+    value_error_reused = []
+    key_error_unreused = []
+    value_error_unreused = []
+    token_positions_reused = []
+    token_positions_unreused = []
+    layer_key_errors_reused = {}  # 存储每层的Key误差
+    layer_value_errors_reused = {}  # 存储每层的Value误差
+    layer_key_errors_unreused = {}  # 存储每层的Key误差
+    layer_value_errors_unreused = {}  # 存储每层的Value误差
+    
+    for item in data["similar_pairs"]:
+        try:
+            if f"meteor_w{window_size}" in item["reused_top1_w31"]:
+                score = item["reused_top1_w31"][f"meteor_w{window_size}"]["meteor"]
+                if score == 0:
+                    # 收集reused位置的误差
+                    key_errors_reused = item["reused_top1_w31"][f"key_error_token_reused_w{window_size}"]
+                    value_errors_reused = item["reused_top1_w31"][f"value_error_token_reused_w{window_size}"]
+                    
+                    # 记录token位置
+                    positions = list(range(len(key_errors_reused)))
+                    token_positions_reused.extend(positions)
+                    key_error_reused.extend(key_errors_reused)
+                    value_error_reused.extend(value_errors_reused)
+                    
+                    # 收集每层的误差
+                    layer_key_errors_item = item["reused_top1_w31"][f"key_error_layer_reused_w{window_size}"]
+                    layer_value_errors_item = item["reused_top1_w31"][f"value_error_layer_reused_w{window_size}"]
+                    
+                    for layer_idx, (key_err, value_err) in enumerate(zip(layer_key_errors_item, layer_value_errors_item)):
+                        if layer_idx not in layer_key_errors_reused:
+                            layer_key_errors_reused[layer_idx] = []
+                            layer_value_errors_reused[layer_idx] = []
+                        layer_key_errors_reused[layer_idx].append(key_err)
+                        layer_value_errors_reused[layer_idx].append(value_err)
+                    
+                    # 收集unreused位置的误差
+                    key_errors_unreused = item["reused_top1_w31"][f"key_error_token_unreused_w{window_size}"]
+                    value_errors_unreused = item["reused_top1_w31"][f"value_error_token_unreused_w{window_size}"]
+                    
+                    # 记录token位置
+                    positions = list(range(len(key_errors_unreused)))
+                    token_positions_unreused.extend(positions)
+                    key_error_unreused.extend(key_errors_unreused)
+                    value_error_unreused.extend(value_errors_unreused)
+                    
+                    # 收集每层的误差
+                    layer_key_errors_item = item["reused_top1_w31"][f"key_error_layer_unreused_w{window_size}"]
+                    layer_value_errors_item = item["reused_top1_w31"][f"value_error_layer_unreused_w{window_size}"]
+                    
+                    for layer_idx, (key_err, value_err) in enumerate(zip(layer_key_errors_item, layer_value_errors_item)):
+                        if layer_idx not in layer_key_errors_unreused:
+                            layer_key_errors_unreused[layer_idx] = []
+                            layer_value_errors_unreused[layer_idx] = []
+                        layer_key_errors_unreused[layer_idx].append(key_err)
+                        layer_value_errors_unreused[layer_idx].append(value_err)
+        except Exception as e:
+            print(f"处理数据时出错: {str(e)}")
+            continue
+    
+    # 创建图表
+    fig = plt.figure(figsize=(15, 12))
+    gs = fig.add_gridspec(3, 2)
+    
+    # 绘制reused token的Key误差随token位置的变化
+    ax1 = fig.add_subplot(gs[0, 0])
+    sns.scatterplot(x=token_positions_reused, y=key_error_reused, ax=ax1, alpha=0.5)
+    sns.lineplot(x=token_positions_reused, y=key_error_reused, ax=ax1, color='red', label='移动平均')
+    ax1.set_title(f'Reused Token Key Error by Position (Window Size {window_size})')
+    ax1.set_xlabel('Token Position')
+    ax1.set_ylabel('Error Value')
+    ax1.grid(True, alpha=0.3)
+    
+    # 绘制reused token的Value误差随token位置的变化
+    ax2 = fig.add_subplot(gs[0, 1])
+    sns.scatterplot(x=token_positions_reused, y=value_error_reused, ax=ax2, alpha=0.5)
+    sns.lineplot(x=token_positions_reused, y=value_error_reused, ax=ax2, color='red', label='移动平均')
+    ax2.set_title(f'Reused Token Value Error by Position (Window Size {window_size})')
+    ax2.set_xlabel('Token Position')
+    ax2.set_ylabel('Error Value')
+    ax2.grid(True, alpha=0.3)
+    
+    # 绘制unreused token的Key误差随token位置的变化
+    ax3 = fig.add_subplot(gs[1, 0])
+    sns.scatterplot(x=token_positions_unreused, y=key_error_unreused, ax=ax3, alpha=0.5)
+    sns.lineplot(x=token_positions_unreused, y=key_error_unreused, ax=ax3, color='red', label='移动平均')
+    ax3.set_title(f'Unreused Token Key Error by Position (Window Size {window_size})')
+    ax3.set_xlabel('Token Position')
+    ax3.set_ylabel('Error Value')
+    ax3.grid(True, alpha=0.3)
+    
+    # 绘制unreused token的Value误差随token位置的变化
+    ax4 = fig.add_subplot(gs[1, 1])
+    sns.scatterplot(x=token_positions_unreused, y=value_error_unreused, ax=ax4, alpha=0.5)
+    sns.lineplot(x=token_positions_unreused, y=value_error_unreused, ax=ax4, color='red', label='移动平均')
+    ax4.set_title(f'Unreused Token Value Error by Position (Window Size {window_size})')
+    ax4.set_xlabel('Token Position')
+    ax4.set_ylabel('Error Value')
+    ax4.grid(True, alpha=0.3)
+    
+    # 绘制reused token的层级误差
+    ax5 = fig.add_subplot(gs[2, 0])
+    layer_indices = sorted(layer_key_errors_reused.keys())
+    layer_key_means_reused = [np.mean(layer_key_errors_reused[idx]) for idx in layer_indices]
+    layer_value_means_reused = [np.mean(layer_value_errors_reused[idx]) for idx in layer_indices]
+    
+    ax5.errorbar(layer_indices, layer_key_means_reused, yerr=layer_value_means_reused, fmt='o-', capsize=5, label='Key Error')
+    ax5.set_title('Reused Token Error by Layer')
+    ax5.set_xlabel('Layer Index')
+    ax5.set_ylabel('Error Value')
+    ax5.legend()
+    ax5.grid(True, alpha=0.3)
+    
+    # 绘制unreused token的层级误差
+    ax6 = fig.add_subplot(gs[2, 1])
+    layer_indices = sorted(layer_key_errors_unreused.keys())
+    layer_key_means_unreused = [np.mean(layer_key_errors_unreused[idx]) for idx in layer_indices]
+    layer_value_means_unreused = [np.mean(layer_value_errors_unreused[idx]) for idx in layer_indices]
+    
+    ax6.errorbar(layer_indices, layer_key_means_unreused, yerr=layer_value_means_unreused, fmt='o-', capsize=5, label='Key Error')
+    ax6.set_title('Unreused Token Error by Layer')
+    ax6.set_xlabel('Layer Index')
+    ax6.set_ylabel('Error Value')
+    ax6.legend()
+    ax6.grid(True, alpha=0.3)
+    
+    # 调整布局
+    plt.tight_layout()
+    
+    # 保存图表
+    plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    plt.close()
+    
+    # 计算每个位置的统计信息
+    position_stats_reused = {}
+    for pos, key_err, value_err in zip(token_positions_reused, key_error_reused, value_error_reused):
+        if pos not in position_stats_reused:
+            position_stats_reused[pos] = {'key_errors': [], 'value_errors': []}
+        position_stats_reused[pos]['key_errors'].append(key_err)
+        position_stats_reused[pos]['value_errors'].append(value_err)
+    
+    position_stats_unreused = {}
+    for pos, key_err, value_err in zip(token_positions_unreused, key_error_unreused, value_error_unreused):
+        if pos not in position_stats_unreused:
+            position_stats_unreused[pos] = {'key_errors': [], 'value_errors': []}
+        position_stats_unreused[pos]['key_errors'].append(key_err)
+        position_stats_unreused[pos]['value_errors'].append(value_err)
+    
+    # 打印统计信息
+    print("\nReused Token位置误差统计信息:")
+    print("-" * 50)
+    print("位置\tKey误差均值\tKey误差标准差\tValue误差均值\tValue误差标准差")
+    print("-" * 80)
+    
+    for pos in sorted(position_stats_reused.keys()):
+        key_mean = np.mean(position_stats_reused[pos]['key_errors'])
+        key_std = np.std(position_stats_reused[pos]['key_errors'])
+        value_mean = np.mean(position_stats_reused[pos]['value_errors'])
+        value_std = np.std(position_stats_reused[pos]['value_errors'])
+        print(f"{pos}\t{key_mean:.4f}\t{key_std:.4f}\t{value_mean:.4f}\t{value_std:.4f}")
+    
+    print("\nUnreused Token位置误差统计信息:")
+    print("-" * 50)
+    print("位置\tKey误差均值\tKey误差标准差\tValue误差均值\tValue误差标准差")
+    print("-" * 80)
+    
+    for pos in sorted(position_stats_unreused.keys()):
+        key_mean = np.mean(position_stats_unreused[pos]['key_errors'])
+        key_std = np.std(position_stats_unreused[pos]['key_errors'])
+        value_mean = np.mean(position_stats_unreused[pos]['value_errors'])
+        value_std = np.std(position_stats_unreused[pos]['value_errors'])
+        print(f"{pos}\t{key_mean:.4f}\t{key_std:.4f}\t{value_mean:.4f}\t{value_std:.4f}")
+    
+    print("\n层误差统计信息:")
+    print("-" * 50)
+    print("层\tReused Key均值\tReused Key标准差\tReused Value均值\tReused Value标准差\t" +
+          "Unreused Key均值\tUnreused Key标准差\tUnreused Value均值\tUnreused Value标准差")
+    print("-" * 120)
+    
+    for layer_idx in sorted(layer_key_errors_reused.keys()):
+        key_mean_reused = np.mean(layer_key_errors_reused[layer_idx])
+        key_std_reused = np.std(layer_key_errors_reused[layer_idx])
+        value_mean_reused = np.mean(layer_value_errors_reused[layer_idx])
+        value_std_reused = np.std(layer_value_errors_reused[layer_idx])
+        
+        key_mean_unreused = np.mean(layer_key_errors_unreused[layer_idx])
+        key_std_unreused = np.std(layer_key_errors_unreused[layer_idx])
+        value_mean_unreused = np.mean(layer_value_errors_unreused[layer_idx])
+        value_std_unreused = np.std(layer_value_errors_unreused[layer_idx])
+        
+        print(f"{layer_idx}\t{key_mean_reused:.4f}\t{key_std_reused:.4f}\t{value_mean_reused:.4f}\t{value_std_reused:.4f}\t" +
+              f"{key_mean_unreused:.4f}\t{key_std_unreused:.4f}\t{value_mean_unreused:.4f}\t{value_std_unreused:.4f}")
+    
+    print(f"\n图表已保存至: {save_path}")
 
+def plot_kv_error_by_window_size(input_path: str, save_path: str = "examples/pipeline/images/kv_error_by_window.png"):
+    """分析不同窗口大小下0分和非0分样本的unreused token的KV误差分布
+    
+    Args:
+        input_path: 输入数据文件路径
+        save_path: 保存图片的路径
+    """
+    with open(input_path, "r") as f:
+        data = json.load(f)
+    
+    window_sizes = [5,10,15,20,25]
+    window_stats = {size: {
+        'layer_key_errors_unreused_zero': {},
+        'layer_value_errors_unreused_zero': {},
+        'layer_key_errors_unreused_nonzero': {},
+        'layer_value_errors_unreused_nonzero': {},
+        'zero_count': 0,
+        'nonzero_count': 0
+    } for size in window_sizes}
+    
+    # 收集数据
+    for item in data["similar_pairs"]:
+        try:
+            for window_size in window_sizes:
+                if f"meteor_w{window_size}" in item["reused_top1_w31"]:
+                    meteor_score = item["reused_top1_w31"][f"meteor_w{window_size}"]["meteor"]
+                    is_zero = meteor_score == 0
+                    
+                    # 更新计数
+                    if is_zero:
+                        window_stats[window_size]['zero_count'] += 1
+                    else:
+                        window_stats[window_size]['nonzero_count'] += 1
+                        
+                    # 收集层级误差
+                    layer_key_errors_unreused = item["reused_top1_w31"][f"key_error_layer_unreused_w{window_size}"]
+                    layer_value_errors_unreused = item["reused_top1_w31"][f"value_error_layer_unreused_w{window_size}"]
+                    
+                    # 存储层级误差
+                    target_dict_key = 'layer_key_errors_unreused_zero' if is_zero else 'layer_key_errors_unreused_nonzero'
+                    target_dict_value = 'layer_value_errors_unreused_zero' if is_zero else 'layer_value_errors_unreused_nonzero'
+                    
+                    for layer_idx, (key_err, value_err) in enumerate(zip(
+                        layer_key_errors_unreused, layer_value_errors_unreused)):
+                        
+                        for target_dict, err_value in [
+                            (target_dict_key, key_err),
+                            (target_dict_value, value_err)
+                        ]:
+                            if layer_idx not in window_stats[window_size][target_dict]:
+                                window_stats[window_size][target_dict][layer_idx] = []
+                            window_stats[window_size][target_dict][layer_idx].append(err_value)
+                            
+        except Exception as e:
+            print(f"处理数据时出错: {str(e)}")
+            continue
+    
+    # 创建图表
+    fig = plt.figure(figsize=(20, 15))
+    gs = fig.add_gridspec(3, 2)
+    
+    # 为每个窗口大小创建子图
+    for i, window_size in enumerate(window_sizes):
+        row = i // 2
+        col = i % 2
+        ax = fig.add_subplot(gs[row, col])
+        
+        # 获取层索引
+        layer_indices = sorted(window_stats[window_size]['layer_key_errors_unreused_zero'].keys())
+        
+        # 计算每层的平均误差
+        # 零分样本
+        layer_key_means_zero = [np.mean(window_stats[window_size]['layer_key_errors_unreused_zero'][idx]) for idx in layer_indices]
+        layer_value_means_zero = [np.mean(window_stats[window_size]['layer_value_errors_unreused_zero'][idx]) for idx in layer_indices]
+        layer_key_std_zero = [np.std(window_stats[window_size]['layer_key_errors_unreused_zero'][idx]) for idx in layer_indices]
+        layer_value_std_zero = [np.std(window_stats[window_size]['layer_value_errors_unreused_zero'][idx]) for idx in layer_indices]
+        
+        # 非零分样本
+        layer_key_means_nonzero = [np.mean(window_stats[window_size]['layer_key_errors_unreused_nonzero'][idx]) for idx in layer_indices]
+        layer_value_means_nonzero = [np.mean(window_stats[window_size]['layer_value_errors_unreused_nonzero'][idx]) for idx in layer_indices]
+        layer_key_std_nonzero = [np.std(window_stats[window_size]['layer_key_errors_unreused_nonzero'][idx]) for idx in layer_indices]
+        layer_value_std_nonzero = [np.std(window_stats[window_size]['layer_value_errors_unreused_nonzero'][idx]) for idx in layer_indices]
+        
+        # 绘制误差曲线和误差带
+        # 零分样本
+        ax.plot(layer_indices, layer_key_means_zero, 'o-', label='Key (Zero)', color='red')
+        ax.fill_between(layer_indices, 
+                       [m - s for m, s in zip(layer_key_means_zero, layer_key_std_zero)],
+                       [m + s for m, s in zip(layer_key_means_zero, layer_key_std_zero)],
+                       alpha=0.2, color='red')
+        
+        ax.plot(layer_indices, layer_value_means_zero, 's--', label='Value (Zero)', color='blue')
+        ax.fill_between(layer_indices,
+                       [m - s for m, s in zip(layer_value_means_zero, layer_value_std_zero)],
+                       [m + s for m, s in zip(layer_value_means_zero, layer_value_std_zero)],
+                       alpha=0.2, color='blue')
+        
+        # 非零分样本
+        ax.plot(layer_indices, layer_key_means_nonzero, '^-', label='Key (Nonzero)', color='orange')
+        ax.fill_between(layer_indices,
+                       [m - s for m, s in zip(layer_key_means_nonzero, layer_key_std_nonzero)],
+                       [m + s for m, s in zip(layer_key_means_nonzero, layer_key_std_nonzero)],
+                       alpha=0.2, color='orange')
+        
+        ax.plot(layer_indices, layer_value_means_nonzero, 'v--', label='Value (Nonzero)', color='green')
+        ax.fill_between(layer_indices,
+                       [m - s for m, s in zip(layer_value_means_nonzero, layer_value_std_nonzero)],
+                       [m + s for m, s in zip(layer_value_means_nonzero, layer_value_std_nonzero)],
+                       alpha=0.2, color='green')
+        
+        # 设置子图属性
+        ax.set_title(f'Window Size {window_size}\nZero: {window_stats[window_size]["zero_count"]}, Nonzero: {window_stats[window_size]["nonzero_count"]}')
+        ax.set_xlabel('Layer Index')
+        ax.set_ylabel('Mean Error Value (with std)')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+    
+    # 调整布局
+    plt.tight_layout()
+    
+    # 保存图表
+    plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    plt.close()
+    
+    # 打印统计信息
+    print("\n每个窗口大小的unreused token层间误差统计信息:")
+    print("-" * 50)
+    print("窗口大小\t样本类型\t样本数\t层数\tKey均值\tKey标准差\tValue均值\tValue标准差")
+    print("-" * 100)
+    
+    for window_size in window_sizes:
+        layer_indices = sorted(window_stats[window_size]['layer_key_errors_unreused_zero'].keys())
+        
+        # 零分样本统计
+        key_mean_zero = np.mean([np.mean(window_stats[window_size]['layer_key_errors_unreused_zero'][idx]) for idx in layer_indices])
+        key_std_zero = np.mean([np.std(window_stats[window_size]['layer_key_errors_unreused_zero'][idx]) for idx in layer_indices])
+        value_mean_zero = np.mean([np.mean(window_stats[window_size]['layer_value_errors_unreused_zero'][idx]) for idx in layer_indices])
+        value_std_zero = np.mean([np.std(window_stats[window_size]['layer_value_errors_unreused_zero'][idx]) for idx in layer_indices])
+        
+        print(f"{window_size}\tZero\t{window_stats[window_size]['zero_count']}\t{len(layer_indices)}\t" +
+              f"{key_mean_zero:.4f}\t{key_std_zero:.4f}\t{value_mean_zero:.4f}\t{value_std_zero:.4f}")
+        
+        # 非零分样本统计
+        key_mean_nonzero = np.mean([np.mean(window_stats[window_size]['layer_key_errors_unreused_nonzero'][idx]) for idx in layer_indices])
+        key_std_nonzero = np.mean([np.std(window_stats[window_size]['layer_key_errors_unreused_nonzero'][idx]) for idx in layer_indices])
+        value_mean_nonzero = np.mean([np.mean(window_stats[window_size]['layer_value_errors_unreused_nonzero'][idx]) for idx in layer_indices])
+        value_std_nonzero = np.mean([np.std(window_stats[window_size]['layer_value_errors_unreused_nonzero'][idx]) for idx in layer_indices])
+        
+        print(f"{window_size}\tNonzero\t{window_stats[window_size]['nonzero_count']}\t{len(layer_indices)}\t" +
+              f"{key_mean_nonzero:.4f}\t{key_std_nonzero:.4f}\t{value_mean_nonzero:.4f}\t{value_std_nonzero:.4f}")
+    
+    print(f"\n图表已保存至: {save_path}")
+
+def generate_reuse_output(text_a: str, text_b: str, text_c: str, model_name: str = "Qwen/Qwen2.5-7B-Instruct", max_model_len=8192, max_generate_len=512, window_size=3):
+    template = "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant. <|im_end|>\n<|im_start|>user\n{text}\n<|im_end|>\n<|im_start|>assistant\n"
+    """Compare generation results when reusing KV Cache from text B and C for text A
+    
+    Args:
+        text_a: Target text
+        text_b: First source text
+        text_c: Second source text
+        model_name: Model name
+        max_model_len: Maximum model length
+        max_generate_len: Maximum generation length
+        
+    Returns:
+        dict: Contains generation results, statistics, and KV error data
+    """
+    device = "cuda:0"
+    pipeline = KVShareNewPipeline(model_name, device, max_model_len)
+    tokenizer = pipeline.model.get_tokenizer()
+    
+    # Prepare prompts
+    prompt_a = template.format(text=text_a)
+    prompt_b = template.format(text=text_b)
+    prompt_c = template.format(text=text_c)
+    
+    # Check token length
+    tokens_a = tokenizer.encode(prompt_a)
+    tokens_b = tokenizer.encode(prompt_b)
+    tokens_c = tokenizer.encode(prompt_c)
+    
+    if len(tokens_a) > max_model_len or len(tokens_b) > max_model_len or len(tokens_c) > max_model_len:
+        raise ValueError("Text length exceeds maximum model length limit")
+    
+    results = {
+        'full_compute': None,
+        'reuse_b': None,
+        'reuse_c': None,
+        'kv_errors': {
+            'full_compute': None,
+            'reuse_b': None,
+            'reuse_c': None
+        },
+        'source_outputs': {
+            'b': None,
+            'c': None
+        },
+        'attention_values': {
+            'full_compute': None,
+            'reuse_b': None,
+            'reuse_c': None
+        }
+    }
+    
+    # 1. Full computation of A
+    full_outputs = KVShareNewPipeline.batch_full_compute(
+        pipeline.model,
+        SamplingParams(temperature=0, max_tokens=max_generate_len),
+        [prompt_a]
+    )
+    results['full_compute'] = full_outputs[0].outputs[0].text
+    
+    # Get full computation KV cache as baseline
+    full_kv_cache, full_outputs, _ = KVShareNewPipeline.get_kvcache_by_full_compute(
+        pipeline.model,
+        SamplingParams(temperature=0, max_tokens=1),
+        [prompt_a]
+    )
+    
+    # 2. Get KV cache for B and C
+    source_kv_cache_b, source_outputs_b, _ = KVShareNewPipeline.get_kvcache_by_full_compute(
+        pipeline.model,
+        SamplingParams(temperature=0, max_tokens=max_generate_len),
+        [prompt_b]
+    )
+    results['source_outputs']['b'] = source_outputs_b[0].outputs[0].text
+    
+    source_kv_cache_c, source_outputs_c, _ = KVShareNewPipeline.get_kvcache_by_full_compute(
+        pipeline.model,
+        SamplingParams(temperature=0, max_tokens=max_generate_len),
+        [prompt_c]
+    )
+    results['source_outputs']['c'] = source_outputs_c[0].outputs[0].text
+    
+    source_token_ids_b = [output.prompt_token_ids for output in source_outputs_b]
+    source_token_ids_c = [output.prompt_token_ids for output in source_outputs_c]
+    
+    # 3. Reuse KV Cache from B
+    target_kv_cache_b, reused_indices_b, unreused_indices_b, selected_tokens_b, target_slices_b = KVEditor.batch_kvedit(
+        [tokens_a],
+        source_token_ids_b,
+        source_kv_cache_b,
+        window_size=window_size
+    )
+    
+    # 4. Reuse KV Cache from C
+    target_kv_cache_c, reused_indices_c, unreused_indices_c, selected_tokens_c, target_slices_c = KVEditor.batch_kvedit(
+        [tokens_a],
+        source_token_ids_c,
+        source_kv_cache_c,
+        window_size=window_size
+    )
+    
+    max_request_id = int(source_outputs_c[0].request_id)
+    
+    # 5. Generate using B's KV Cache
+    outputs_b, partial_kv_cache_b = KVShareNewPipeline.partial_compute(
+        pipeline.model,
+        SamplingParams(temperature=0, max_tokens=max_generate_len),
+        [prompt_a],
+        target_kv_cache_b,
+        reused_indices_b,
+        unreused_indices_b,
+        selected_tokens_b,
+        target_slices_b,
+        [max_request_id+1]
+    )
+    
+    # Calculate KV errors for B
+    key_error_b = torch.abs(full_kv_cache[:,0,:,:] - partial_kv_cache_b[:,0,:,:])
+    value_error_b = torch.abs(full_kv_cache[:,1,:,:] - partial_kv_cache_b[:,1,:,:])
+    
+    # Calculate average error per layer
+    layer_key_errors_b = torch.mean(key_error_b, dim=[1,2]).cpu().numpy()
+    layer_value_errors_b = torch.mean(value_error_b, dim=[1,2]).cpu().numpy()
+    
+    # Calculate average error per token
+    token_key_errors_b = torch.mean(key_error_b, dim=[0,2]).cpu().numpy()
+    token_value_errors_b = torch.mean(value_error_b, dim=[0,2]).cpu().numpy()
+    
+    # Get attention values for B
+    last_layer_idx = len(pipeline.model.llm_engine.model_executor.driver_worker.model_runner.model.model.layers) - 1
+    last_layer = pipeline.model.llm_engine.model_executor.driver_worker.model_runner.model.model.layers[last_layer_idx]
+    # attention_values_b = {
+    #     'query': last_layer.self_attn.hack_q.cpu().numpy(),
+    #     'key': last_layer.self_attn.hack_k.cpu().numpy(),
+    #     'value': last_layer.self_attn.hack_v.cpu().numpy()
+    # }
+    
+    max_request_id = int(outputs_b[0].request_id)
+    
+    # 6. Generate using C's KV Cache
+    outputs_c, partial_kv_cache_c = KVShareNewPipeline.partial_compute(
+        pipeline.model,
+        SamplingParams(temperature=0, max_tokens=max_generate_len),
+        [prompt_a],
+        target_kv_cache_c,
+        reused_indices_c,
+        unreused_indices_c,
+        selected_tokens_c,
+        target_slices_c,
+        [max_request_id+1]
+    )
+    
+    # Calculate KV errors for C
+    key_error_c = torch.abs(full_kv_cache[:,0,:,:] - partial_kv_cache_c[:,0,:,:])
+    value_error_c = torch.abs(full_kv_cache[:,1,:,:] - partial_kv_cache_c[:,1,:,:])
+    
+    # Calculate average error per layer
+    layer_key_errors_c = torch.mean(key_error_c, dim=[1,2]).cpu().numpy()
+    layer_value_errors_c = torch.mean(value_error_c, dim=[1,2]).cpu().numpy()
+    
+    # Calculate average error per token
+    token_key_errors_c = torch.mean(key_error_c, dim=[0,2]).cpu().numpy()
+    token_value_errors_c = torch.mean(value_error_c, dim=[0,2]).cpu().numpy()
+    
+    # # Get attention values for C
+    # attention_values_c = {
+    #     'query': last_layer.self_attn.hack_q.cpu().numpy(),
+    #     'key': last_layer.self_attn.hack_k.cpu().numpy(),
+    #     'value': last_layer.self_attn.hack_v.cpu().numpy()
+    # }
+    
+    # # Get attention values for full compute
+    # attention_values_full = {
+    #     'query': last_layer.self_attn.hack_q.cpu().numpy(),
+    #     'key': last_layer.self_attn.hack_k.cpu().numpy(),
+    #     'value': last_layer.self_attn.hack_v.cpu().numpy()
+    # }
+    
+    # 7. Save results
+    results['reuse_b'] = {
+        'output': outputs_b[0].outputs[0].text,
+        'reused_tokens': len(reused_indices_b[0]),
+        'unreused_tokens': len(unreused_indices_b[0]),
+        'reused_indices': reused_indices_b[0]  # Save reused token indices
+    }
+    
+    results['reuse_c'] = {
+        'output': outputs_c[0].outputs[0].text,
+        'reused_tokens': len(reused_indices_c[0]),
+        'unreused_tokens': len(unreused_indices_c[0]),
+        'reused_indices': reused_indices_c[0]  # Save reused token indices
+    }
+    
+    # Save KV error data
+    results['kv_errors']['reuse_b'] = {
+        'key_errors': layer_key_errors_b,
+        'value_errors': layer_value_errors_b,
+        'token_key_errors': token_key_errors_b,
+        'token_value_errors': token_value_errors_b
+    }
+    
+    results['kv_errors']['reuse_c'] = {
+        'key_errors': layer_key_errors_c,
+        'value_errors': layer_value_errors_c,
+        'token_key_errors': token_key_errors_c,
+        'token_value_errors': token_value_errors_c
+    }
+    
+    # Save attention values
+    # results['attention_values']['full_compute'] = attention_values_full
+    # results['attention_values']['reuse_b'] = attention_values_b
+    # results['attention_values']['reuse_c'] = attention_values_c
+    
+    # Save token IDs for visualization
+    results['token_ids'] = tokens_a
+    
+    return results
+
+def print_reuse_results(results: dict):
+    """Print comparison of reuse results
+    
+    Args:
+        results: Return value from generate_reuse_output
+    """
+    print("\nFull Computation Result:")
+    print("-" * 50)
+    print(results['full_compute'])
+    
+    # print("\nSource Text B Output:")
+    # print("-" * 50)
+    # print(results['source_outputs']['b'])
+    
+    # print("\nSource Text C Output:")
+    # print("-" * 50)
+    # print(results['source_outputs']['c'])
+    
+    print("\nReusing Text B Result:")
+    print("-" * 50)
+    print(f"Reused tokens: {results['reuse_b']['reused_tokens']}")
+    print(f"Unreused tokens: {results['reuse_b']['unreused_tokens']}")
+    print(f"Generated output: {results['reuse_b']['output']}")
+    
+    print("\nReusing Text C Result:")
+    print("-" * 50)
+    print(f"Reused tokens: {results['reuse_c']['reused_tokens']}")
+    print(f"Unreused tokens: {results['reuse_c']['unreused_tokens']}")
+    print(f"Generated output: {results['reuse_c']['output']}")
+
+def plot_kv_error_comparison(results: dict, save_path: str = "examples/pipeline/images/kv_error_comparison.png"):
+    """Visualize KV error comparison when reusing KV Cache from B and C
+    
+    Args:
+        results: Return value from generate_reuse_output
+        save_path: Path to save the image
+    """
+    # Create figure
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+    
+    # Get number of layers
+    num_layers = len(results['kv_errors']['reuse_b']['key_errors'])
+    layer_indices = range(num_layers)
+    
+    # Plot Key error comparison
+    ax1.plot(layer_indices, results['kv_errors']['reuse_b']['key_errors'], 'o-', label='Reuse B', color='red')
+    ax1.plot(layer_indices, results['kv_errors']['reuse_c']['key_errors'], 's--', label='Reuse C', color='blue')
+    ax1.set_title('Key Error Comparison')
+    ax1.set_xlabel('Layer Index')
+    ax1.set_ylabel('Average Error')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    
+    # Plot Value error comparison
+    ax2.plot(layer_indices, results['kv_errors']['reuse_b']['value_errors'], 'o-', label='Reuse B', color='red')
+    ax2.plot(layer_indices, results['kv_errors']['reuse_c']['value_errors'], 's--', label='Reuse C', color='blue')
+    ax2.set_title('Value Error Comparison')
+    ax2.set_xlabel('Layer Index')
+    ax2.set_ylabel('Average Error')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    
+    # Adjust layout
+    plt.tight_layout()
+    
+    # Save figure
+    plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    plt.close()
+    
+    # Print statistics
+    print("\nKV Error Statistics:")
+    print("-" * 50)
+    print("Method\tKey Mean\tKey Std\tValue Mean\tValue Std")
+    print("-" * 80)
+    
+    for method, label in [('reuse_b', 'Reuse B'), ('reuse_c', 'Reuse C')]:
+        key_errors = results['kv_errors'][method]['key_errors']
+        value_errors = results['kv_errors'][method]['value_errors']
+        
+        print(f"{label}\t{np.mean(key_errors):.4f}\t{np.std(key_errors):.4f}\t" +
+              f"{np.mean(value_errors):.4f}\t{np.std(value_errors):.4f}")
+    
+    print(f"\nFigure saved to: {save_path}")
+
+def plot_token_kv_errors(results: dict, tokenizer, save_path: str = "examples/pipeline/images/token_kv_errors.png"):
+    """Visualize KV errors for each token position with token words
+    
+    Args:
+        results: Return value from generate_reuse_output
+        tokenizer: Tokenizer used for decoding tokens
+        save_path: Path to save the image
+    """
+    # Create figure with larger size to accommodate token labels
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(20, 12))
+    
+    # Get token positions and words
+    num_tokens = len(results['kv_errors']['reuse_b']['token_key_errors'])
+    token_positions = range(num_tokens)
+    
+    # Decode tokens to words
+    token_words = [tokenizer.decode([token]) for token in results['token_ids']]
+    
+    # Get reused token indices
+    reused_indices_b = results['reuse_b']['reused_indices']
+    reused_indices_c = results['reuse_c']['reused_indices']
+    
+    # Create second x-axis for both subplots
+    ax1_top = ax1.twiny()
+    ax2_top = ax2.twiny()
+    
+    # Plot Key error by token position
+    ax1.plot(token_positions, results['kv_errors']['reuse_b']['token_key_errors'], 'o-', label='Reused key of B', color='blue')
+    ax1.plot(token_positions, results['kv_errors']['reuse_c']['token_key_errors'], 's--', label='Reused key of C', color='red')
+    
+    ax1.set_title('Key Error by Token Position')
+    ax1.set_xlabel('Token Position')
+    ax1.set_ylabel('Average Error')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    
+    # Plot Value error by token position
+    ax2.plot(token_positions, results['kv_errors']['reuse_b']['token_value_errors'], 'o-', label='Reused value of B', color='blue')
+    ax2.plot(token_positions, results['kv_errors']['reuse_c']['token_value_errors'], 's--', label='Reused value of C', color='red')
+    
+    ax2.set_title('Value Error by Token Position')
+    ax2.set_xlabel('Token Position')
+    ax2.set_ylabel('Average Error')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    
+    # Set x-axis labels for top axis (B's tokens) in both subplots
+    ax1_top.set_xticks(token_positions)
+    ax1_top.set_xticklabels(token_words, rotation=70, ha='right')
+    ax2_top.set_xticks(token_positions)
+    ax2_top.set_xticklabels(token_words, rotation=70, ha='right')
+    
+    # Set x-axis labels for bottom axis (C's tokens) in both subplots
+    ax1.set_xticks(token_positions)
+    ax1.set_xticklabels(token_words, rotation=70, ha='right')
+    ax2.set_xticks(token_positions)
+    ax2.set_xticklabels(token_words, rotation=70, ha='right')
+    
+    # Set different colors for reused and unreused tokens in both subplots
+    for idx, label in enumerate(ax1_top.get_xticklabels()):
+        if idx in reused_indices_b:
+            label.set_color('blue')
+        else:
+            label.set_color('black')
+    
+    for idx, label in enumerate(ax1.get_xticklabels()):
+        if idx in reused_indices_c:
+            label.set_color('red')
+        else:
+            label.set_color('black')
+    
+    for idx, label in enumerate(ax2_top.get_xticklabels()):
+        if idx in reused_indices_b:
+            label.set_color('blue')
+        else:
+            label.set_color('black')
+    
+    for idx, label in enumerate(ax2.get_xticklabels()):
+        if idx in reused_indices_c:
+            label.set_color('red')
+        else:
+            label.set_color('black')
+    
+    # Adjust layout to prevent label cutoff
+    plt.tight_layout()
+    
+    # Save figure
+    plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    plt.close()
+    
+    # Print token error statistics
+    print("\nToken-level KV Error Statistics:")
+    print("-" * 50)
+    print("Token\tWord\tReused\tKey Error (B)\tValue Error (B)\tKey Error (C)\tValue Error (C)")
+    print("-" * 120)
+    
+    for pos, word in enumerate(token_words):
+        is_reused_b = pos in reused_indices_b
+        is_reused_c = pos in reused_indices_c
+        reused_status = f"B:{is_reused_b},C:{is_reused_c}"
+        
+        key_error_b = results['kv_errors']['reuse_b']['token_key_errors'][pos]
+        value_error_b = results['kv_errors']['reuse_b']['token_value_errors'][pos]
+        key_error_c = results['kv_errors']['reuse_c']['token_key_errors'][pos]
+        value_error_c = results['kv_errors']['reuse_c']['token_value_errors'][pos]
+        
+        print(f"{pos}\t{word}\t{reused_status}\t{key_error_b:.4f}\t{value_error_b:.4f}\t{key_error_c:.4f}\t{value_error_c:.4f}")
+    
+    print(f"\nFigure saved to: {save_path}")
+
+# 使用示例
 if __name__ == "__main__":
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     os.environ["VLLM_USE_MODELSCOPE"]="True"
-    input_path = "examples/dataset/data/opus/opus_dataset_en-zh_similar_docs_top50_250403_windows_copy.json"
     
+    # # 示例文本
+    # text_a = "List: durian, apple, banana, pineapple, orange. How many different kinds of fruits appeared in the previous text?"
+    # text_b = "List: grape, pineapple, orange, apple, banana, peach, watermelon. Which kind of fruit has a lower calorie content?"
+    # text_c = "List: watermelon, grape, apple, banana, pineapple, orange. Which kind of fruit has a lower calorie content?"
     
+    # text_a = "List: durian, durian, apple, banana, pineapple, orange. How many different kinds of fruits appeared in the previous text? Count repeated fruits only once."
+    # text_b = "List: grape / pineapple / orange / apple, banana / peach / watermelon. Which kind of fruit has a lower calorie content?"
+    # text_c = "List: watermelon / grape / apple / banana, pineapple / orange. Which kind of fruit has a lower calorie content?"
     
+    # 对于term来说，复用的token的边界可能都会损失
+    # text_a = "List: lemon, pomelo, pineapple, banana, apple, orange, watermelon. How many different kinds of fruits appeared in the previous text? Count repeated fruits only once."
+    # text_b = "List: grape / watermelon / apple, orange / banana. Which kind of fruit has a lower calorie content?"
+    # text_c = "List: grape / apple, orange / banana / grape.  Which kind of fruit has a lower calorie content?"
     
-    # split_data_by_windows_size(input_path, "examples/dataset/data/opus/opus_dataset_en-zh_similar_docs_top50_250403_windows.json")
-    # windows_sizes = [3,5,7,9,11,13,15]
-    
-    
-    # # 创建进程池，进程数取窗口大小数量和CPU核心数的较小值
-    # num_processes = min(len(windows_sizes), mp.cpu_count())
-    # pool = mp.Pool(processes=num_processes)
-    
-    # # 使用partial固定input_path参数
-    # process_func = partial(process_window_size, input_path)
-    
-    # # 并行处理所有窗口大小
-    # pool.map(process_func, windows_sizes)
-    
-    # # 关闭进程池
-    # pool.close()
-    # pool.join()
-    
-    template = qwen_template
-    model_name = "Qwen/Qwen2.5-32B-Instruct-GPTQ-Int4"
-    # model_name = "Qwen/Qwen2.5-1.5B-Instruct"
-    # template = llama3_template_text
-    # model_name = "LLM-Research/Meta-Llama-3.1-70B-Instruct-GPTQ-INT4"
-    
-    # input_path = f"examples/dataset/data/opus/opus_dataset_en-zh_similar_docs_top50_250403_windows.json"
-    # output_path = f"examples/dataset/data/opus/opus_dataset_en-zh_similar_docs_top50_250403_windows_output_llama3.1-8b.json"
-    # generate_output_data(input_path,output_path,model_name=model_name,batch_size=32)
-    
-    # input_path = f"examples/dataset/data/opus/opus_dataset_en-zh_similar_docs_top50_250403_windows.json"
-    # output_path = f"examples/dataset/data/opus/opus_dataset_en-zh_similar_docs_top50_250403_windows_output_llama3.1-70b.json"
-    # generate_output_data(input_path,output_path,model_name=model_name,batch_size=32)
-    
-    input_path = f"examples/dataset/data/opus/opus_dataset_en-zh_similar_docs_top50_250403_windows.json"
-    output_path = f"examples/dataset/data/opus/opus_dataset_en-zh_similar_docs_top50_250405_windows_output_qwen2.5-32b.json"
-    generate_output_data(input_path,output_path,model_name=model_name,batch_size=72,max_generate_len=512)
-    
-    # input_path = f"examples/dataset/data/opus/opus_dataset_en-zh_similar_docs_top50_250403_windows_output_qwen2.5-32b.json"
-    # output_path = f"examples/dataset/data/opus/opus_dataset_en-zh_similar_docs_top50_250403_fc_output_qwen2.5-32b.json"
-    # compute_full_compute_acc(input_path,output_path,model_name,batch_size=24)
-    
-    # input_path = f"examples/dataset/data/opus/opus_dataset_en-zh_similar_docs_top50_250403_windows_output_llama3.1-8b.json"
-    # output_path = f"examples/dataset/data/opus/opus_dataset_en-zh_similar_docs_top50_250403_fc_output_llama3.1-8b.json"
-    # compute_full_compute_acc(input_path,output_path,model_name,batch_size=24)
-    
-    # 绘制不同窗口大小下的METEOR分数的CDF曲线对比
-    # plot_meteor_by_window_size(output_path, "examples/pipeline/images/opus_meteor_by_window_qwen2.5-32b.png")
-    
-    # input_path = f"examples/dataset/data/opus/opus_dataset_en-zh_similar_docs_top50_250403_windows_7_output_qwen2.5-32b.json"
-    # output_path = f"examples/dataset/data/opus/opus_dataset_en-zh_similar_docs_top50_250403_windows_15_output_qwen2.5-32b.json"
-    # generate_output_data(input_path,output_path,batch_size=1,model_name=model_name,window_size=15)
-    
-    # output_path = "examples/dataset/data/opus/opus_dataset_en-zh_similar_docs_test1_output_llama3.1-8b.json"
-    # generate_output_data(input_path,output_path,batch_size=2,model_name=model_name)
-    # plot_bleu_comparison(output_path)
-    
-    
-    # plot_bleu_comparison("examples/dataset/data/opus/opus_dataset_en-zh_similar_docs_test1_output_llama3.1-8b.json","examples/pipeline/images/opus_bleu_comparison_llama3.1-8b.pdf")
-    # plot_bleu_comparison("examples/dataset/data/opus/opus_dataset_en-zh_similar_docs_top50_test1_output_qwen2.5-7b.json","examples/pipeline/images/opus_bleu_comparison_qwen32-7b.pdf")
-    # outputs = [
-    #     ("Llama3.1-8B","examples/dataset/data/opus/opus_dataset_en-zh_similar_docs_test1_output_llama3.1-8b.json"),
-    #     ("Qwen2.5-32B","examples/dataset/data/opus/opus_dataset_en-zh_similar_docs_test1_output_qwen2.5-7b.json"),
-    # ]
-    # for model_name,output_path in outputs:
-    #     generate_output_data(input_path,output_path,batch_size=2,model_name=model_name)
-    #     plot_bleu_comparison(output_path)
+    # 连续复用的过多会导致注意力损失很多
+    text_a = "List: lemon, pomelo, pineapple, banana, apple, orange. How many different kinds of fruits appeared in the previous text? Count repeated fruits only once."
+    # text_b = "List: grape / durian / peach / watermelon. How many different kinds of fruits appeared in the previous text? Count repeated fruits only once."
+    text_c = "List: banana, apple, orange, grape, durian, peach, watermelon. How many different kinds of fruits appeared in the previous text? Count repeated fruits only once."
+    text_c = "List: lemon, pomelo, pineapple. How many different kinds of fruits appeared in the previous text? Count repeated fruits only once."
+    # text_c = "List: banana, apple, orange. How many different kinds of fruits appeared in the previous text? Count repeated fruits only once."
+    #  pitaya, strawberry, cantaloupe, pear, watermelon, pineapple, peach, durian, 
+    text_a = "lemon, pomelo, banana, apple, orange. How many different kinds of fruits mentioned in the text? Count repeated fruits only once."
+    text_b = "peach, watermelon, banana, apple. Which kind of fruit has a lower calorie content?"
+    # text_c = "List: pineapple, banana / lemon / apple, orange. Which kind of fruit has a lower calorie content?"
+    # text_c = "List: lemon, pomelo. Which kind of fruit has a lower calorie content?"
+    text_c = "lemon, orange. How many different kinds of fruits mentioned in the text? Count repeated fruits only once."
 
-    # 只保存过滤后的数据
-    # save_filtered_data(
-    #     "examples/dataset/data/opus/opus_dataset_en-zh_similar_docs_top50_250403_windows_output_qwen2.5-32b.json",
-    #     "examples/dataset/data/opus/opus_dataset_en-zh_similar_docs_top50_250403_windows_output_qwen2.5-32b_filtered.json"
-    # )
+    # text_a = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27. How many numbers are mentioned in the sequence?"
+    # text_b = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27. How many numbers are mentioned in the sequence?"
+    # text_c = "27. How many numbers are mentioned in the sequence?"
+    
+    text_a = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27. In the sequence of numbers, what is the median number?"
+    text_b = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27. In the sequence of numbers, what is the median number?"
+    text_c = "27. In the sequence of numbers, what is the median number?"
 
-    # 或者直接使用plot_meteor_by_window_size，它会自动保存过滤后的数据
-    # plot_meteor_by_window_size(
-    #     "examples/dataset/data/opus/opus_dataset_en-zh_similar_docs_top50_250403_fc_output_qwen2.5-32b.json",
-    #     "examples/pipeline/images/opus_meteor_by_window_qwen2.5-32b.pdf"
-    # )
-    # 或者直接使用plot_meteor_by_window_size，它会自动保存过滤后的数据
-    # plot_meteor_by_window_size(
-    #     "examples/dataset/data/opus/opus_dataset_en-zh_similar_docs_top50_250403_windows_output_llama3.1-8b.json",
-    #     "examples/pipeline/images/opus_meteor_by_window_llama3.1-8b.pdf",
-    #     tag="reused_top1_w31"
-    # )
-    # 绘制相似度和METEOR分数的关系图
-    # plot_meteor_by_window_size(
-    #     "examples/dataset/data/opus/opus_dataset_en-zh_similar_docs_top50_250403_fc_output_qwen2.5-32b.json",
-    #     "examples/pipeline/images/opus_similarity_vs_meteor.pdf"
-    # )
+
+    
+    model_name = "Qwen/Qwen2.5-7B-Instruct-GPTQ-Int4"
+    results = generate_reuse_output(text_a, text_b, text_c, model_name,window_size=5)
+    print_reuse_results(results)
+    # plot_kv_error_comparison(results)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    plot_token_kv_errors(results, tokenizer)
+    
+    # plot_kv_error_by_window_size("examples/dataset/data/opus/opus_dataset_en-zh_similar_docs_top50_250405_windows_output_qwen2.5-32b.json", "examples/pipeline/images/kv_error_by_window_size.png")
+    
