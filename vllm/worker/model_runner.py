@@ -1579,6 +1579,9 @@ class KVSharePreillMetadata:
     batch_current_request_ids=[]
     batch_prefilled_request_ids=[]
     
+    batch_decode_request_ids=[]
+    # batch_decode_attn=[]
+    
     # 0: full compute
     # 1: partial compute
     is_partial_compute = False
@@ -1593,6 +1596,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
     
     #
     _hack_kv_tables = dict()
+    _hack_attn_table = dict()
     _hack_kv_seq = []
     _kvshare_preill_metadata = KVSharePreillMetadata()
 
@@ -1647,6 +1651,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                     # prompt_hash_value = hash(tuple(seq_group_metadata.seq_data[int(seq_group_metadata.request_id)].prompt_token_ids))
                     prompt_len = len((seq_group_metadata.seq_data[int(seq_group_metadata.request_id)].prompt_token_ids))
                     self._hack_kv_seq.append((int(seq_group_metadata.request_id),prompt_len))
+        
+        
+                    
         if model_input.attn_metadata.prefill_metadata and self._kvshare_preill_metadata.is_partial_compute:
             # 先定位这次是那些prefill请求
             self.model.model.cache_fuse_metadata["check"]  = True
@@ -1699,6 +1706,11 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             # model_input.attn_metadata.query_start_loc = torch.cat([torch.tensor([0],device=self.device),selected_token_indices+1])
         else:
             self.model.model.cache_fuse_metadata['check'] = False
+        
+        if model_input.attn_metadata.decode_metadata and self.model.model.cache_fuse_metadata["collect_forward_attn"]:
+            for seq_group_metadata in seq_group_metadata_list:
+                if not seq_group_metadata.is_prompt:
+                    self._kvshare_preill_metadata.batch_decode_request_ids.append(int(seq_group_metadata.request_id))
         
         return dataclasses.replace(model_input,
                                    sampling_metadata=sampling_metadata,
@@ -1790,8 +1802,19 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                     **seqlen_agnostic_kwargs)
             
             # NOTE
+            # if self.model.model.cache_fuse_metadata['collect_forward_attn'] and model_input.attn_metadata.prefill_metadata:
+            #     # hack_attn = self.model.model.layers[6].self_attn.hack_attn
+            #     # 根据seq顺序取出decode阶段的attn
+            #     for batch_idx,request_id in enumerate(self._kvshare_preill_metadata.batch_decode_request_ids):
+                    
+            #         self._hack_attn_table[request_id] = hack_attn
+                  
+            #     self.model.model.layers[6].self_attn.hack_attn = []
+            #     self._kvshare_preill_metadata.batch_decode_request_ids = []
+            
             if self.model.model.cache_fuse_metadata['collect'] and model_input.attn_metadata.prefill_metadata:
                 batch_seq_kv = [[] for _ in range(len(self._hack_kv_seq))]
+               
                 batch_seq_prefix_len = 0
                 batch_seq_slice_list = []
                 for (request_id,seq_len) in self._hack_kv_seq:
@@ -1806,8 +1829,13 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                             hack_kv[1][start_token_idx:end_token_idx,:].detach().cpu()
                         ])
                     self.model.model.layers[layer_idx].self_attn.hack_kv = []
+                    if self.model.model.cache_fuse_metadata['collect_forward_attn'] and layer_idx == 27:
+                        for batch_idx, (start_token_idx,end_token_idx) in enumerate(batch_seq_slice_list):
+                            self._hack_attn_table[request_id] = self.model.model.layers[layer_idx].self_attn.hack_attn[start_token_idx:end_token_idx,:,:]
+
                 for batch_idx, (request_id,seq_len) in enumerate(self._hack_kv_seq):
                     self._hack_kv_tables[request_id] = batch_seq_kv[batch_idx]
+                    
                 self._hack_kv_seq = []
 
         if (self.observability_config is not None

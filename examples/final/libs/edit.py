@@ -306,9 +306,7 @@ class KVEditor:
                 
                 if  from_position[1] - from_position[0] >  num_pad*2:
                     from_position[0] = from_position[0]+num_pad
-                    # from_position[1] = from_position[1]-num_pad
                     to_position[0] = to_position[0]+num_pad
-                    # to_position[1] = to_position[1]-num_pad
 # 
                 if from_position[1]-from_position[0] != to_position[1]-to_position[0]:
                     print(from_position,to_position)

@@ -36,14 +36,17 @@ class KVShareNewPipeline:
         model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["additional_map_indices"] = None
         model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["old_kv_map_indices"] = None
         model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["imp_indices"] = None
+        model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["collect_forward_attn"] = True
         model.llm_engine.model_executor.driver_worker.model_runner._kvshare_preill_metadata.is_partial_compute = False
         num_layer = len(model.llm_engine.model_executor.driver_worker.model_runner.model.model.layers)
         for j in range(num_layer):
             model.llm_engine.model_executor.driver_worker.model_runner.model.model.layers[j].self_attn.hack_kv = []
+            model.llm_engine.model_executor.driver_worker.model_runner.model.model.layers[j].self_attn.hack_attn = []
         
         
         # 清空缓存
         model.llm_engine.model_executor.driver_worker.model_runner._hack_kv_tables = dict()
+        model.llm_engine.model_executor.driver_worker.model_runner._hack_attn_table = dict()
         torch.cuda.empty_cache()
         
         output:List[RequestOutput] = model.generate(prompt, sampling_params,use_tqdm=False)
@@ -63,7 +66,13 @@ class KVShareNewPipeline:
             past_key_values = torch.stack(past_key_values,dim=0)
             batch_kvcache.append(past_key_values)
         batch_kvcache = torch.concat(batch_kvcache,dim=2)
-        return batch_kvcache,output,keys
+        
+        hack_attn_tables = model.llm_engine.model_executor.driver_worker.model_runner._hack_attn_table
+        keys = sorted(hack_attn_tables.keys())
+        batch_attn = []
+        for key in keys:
+            batch_attn.append(hack_attn_tables[key])
+        return batch_kvcache,output,keys,batch_attn
         
     @staticmethod
     def find_texts_differences(source_token_ids:List[int],target_token_ids:List[int]):
@@ -125,7 +134,7 @@ class KVShareNewPipeline:
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata['collect'] = True
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["recomp_ratio"] = 0.0
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["use_additional_indices"] = True
-
+        llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["collect_forward_attn"] = True
         llm_model.llm_engine.model_executor.driver_worker.model_runner._kvshare_preill_metadata.batch_reused_map_indices = reused_map_indices
         llm_model.llm_engine.model_executor.driver_worker.model_runner._kvshare_preill_metadata.batch_unreused_map_indices = unreused_map_indices
         llm_model.llm_engine.model_executor.driver_worker.model_runner._kvshare_preill_metadata.batch_sample_selected_token_indices = sample_selected_token_indices
@@ -138,10 +147,11 @@ class KVShareNewPipeline:
         num_layer = len(llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.layers)
         for j in range(num_layer):
             llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.layers[j].self_attn.hack_kv = []
-        
+            llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.layers[j].self_attn.hack_attn = []
         
         # 清空缓存
         llm_model.llm_engine.model_executor.driver_worker.model_runner._hack_kv_tables = dict()
+        llm_model.llm_engine.model_executor.driver_worker.model_runner._hack_attn_table = dict()
         
         outputs = llm_model.generate(batch_target_prompt,sampling_params,use_tqdm=False)
         
@@ -171,7 +181,13 @@ class KVShareNewPipeline:
             batch_kvcache.append(past_key_values)
         batch_kvcache = torch.concat(batch_kvcache,dim=2)
         
+        hack_attn_tables = llm_model.llm_engine.model_executor.driver_worker.model_runner._hack_attn_table
+        keys = sorted(hack_attn_tables.keys())
+        batch_attn = []
+        for key in keys:
+            batch_attn.append(hack_attn_tables[key])
+        # batch_attn = torch.concat(batch_attn,dim=0)
         torch.cuda.empty_cache()
-        return outputs,batch_kvcache
+        return outputs,batch_kvcache,batch_attn
     
     

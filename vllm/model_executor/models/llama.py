@@ -208,12 +208,7 @@ class LlamaAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         
-        if status in [1,2]:
-            if cache_fuse_metadata["fake_q"] is None:
-                cache_fuse_metadata['fake_q'] = torch.rand_like(q)
-            _, old_kv[0] = self.rotary_emb(cache_fuse_metadata['org_pos'],
-                                        cache_fuse_metadata['fake_q'],
-                                        old_kv[0])
+        
         if cache_fuse_metadata['collect'] and attn_metadata.prefill_metadata:
             
             if cache_fuse_metadata["use_additional_indices"]:
@@ -228,12 +223,14 @@ class LlamaAttention(nn.Module):
                     self.hack_kv = [key_old,value_old]
             else:
                 # NOTE VLLM在批处理的时候可能会循环调用这个
-                if len(self.hack_kv)!=0:
-                    self.hack_kv[0] = torch.concat([self.hack_kv[0],k.clone()],dim=0)
-                    self.hack_kv[1] = torch.concat([self.hack_kv[1],v.clone()],dim=0)
-                else:
-                    self.hack_kv = [k.clone(), v.clone()]
-        
+                
+                self.hack_kv = [k.clone(), v.clone()]
+            if status in [1,2]:
+                if cache_fuse_metadata["fake_q"] is None:
+                    cache_fuse_metadata['fake_q'] = torch.rand_like(q)
+                _, old_kv[0] = self.rotary_emb(cache_fuse_metadata['org_pos'],
+                                            cache_fuse_metadata['fake_q'],
+                                            old_kv[0])
         
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata, status=status,

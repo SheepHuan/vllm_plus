@@ -203,7 +203,8 @@ class Qwen2Attention(nn.Module):
                               attn_type=attn_type)
         # 逻辑需要修改
         self.hack_kv = []
-        self.hack_attn = None
+        self.hack_attn = []
+        self.hack_kv_for_attn = None
 
     def forward(
         self,
@@ -237,21 +238,49 @@ class Qwen2Attention(nn.Module):
                 
                 self.hack_kv = [k.clone(),v.clone()]
                 # self.hack_attn = [attn_metadata.clone()]
+        if status in [0,1]:
+            old_kv[0] = k.clone()
+            old_kv[1] = v.clone()
+            
         if status in [1,2]:
             if cache_fuse_metadata["fake_q"] is None:
                 cache_fuse_metadata['fake_q'] = torch.rand_like(q)
             _, old_kv[0] = self.rotary_emb(cache_fuse_metadata['org_pos'],
                                         cache_fuse_metadata['fake_q'],
                                         old_kv[0])    
-                  
-
         
+
         q, k = self.rotary_emb(positions, q, k)
         
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata,status,
                                 cache_fuse_metadata,old_kv)
-        if cache_fuse_metadata['collect'] and attn_metadata.prefill_metadata:    
-            self.hack_attn = attn_output.clone()
+        if cache_fuse_metadata["collect_forward_attn"] and attn_metadata.prefill_metadata:
+            num_queries_per_kv = self.num_heads // self.num_kv_heads 
+            # self.hack_attn = attn_output
+            if status in [2]:
+                old_kv[0][cache_fuse_metadata["imp_indices"],:] = k.clone()
+                old_k_for_attn = old_kv[0].clone()
+                old_k_for_attn = old_k_for_attn.view(-1,self.num_kv_heads,self.head_dim)
+                old_k_for_attn = old_k_for_attn[:, :,
+                  None, :].expand(old_k_for_attn.shape[0], self.num_kv_heads,
+                                  num_queries_per_kv, old_k_for_attn.shape[-1])
+                old_k_for_attn = old_k_for_attn.reshape(-1,self.num_heads,self.head_dim).permute(1,2,0)
+                num_queries = q.shape[0]
+                q_head = q.reshape(-1,self.num_heads,self.head_dim).permute(1,0,2)
+                attn_score = torch.bmm(q_head,old_k_for_attn/ (self.head_dim**0.5))
+                self.hack_attn = attn_score
+            else:
+                old_k_for_attn = k.clone()
+                old_k_for_attn = old_k_for_attn.view(-1,self.num_kv_heads,self.head_dim)
+                old_k_for_attn = old_k_for_attn[:, :,
+                  None, :].expand(old_k_for_attn.shape[0], self.num_kv_heads,
+                                  num_queries_per_kv, old_k_for_attn.shape[-1])
+                old_k_for_attn = old_k_for_attn.reshape(-1,self.num_heads,self.head_dim).permute(1,2,0)
+                num_queries = q.shape[0]
+                q_head = q.reshape(-1,self.num_heads,self.head_dim).permute(1,0,2)
+                attn_score = torch.bmm(q_head,old_k_for_attn/ (self.head_dim**0.5))
+                self.hack_attn = attn_score
+
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -403,6 +432,7 @@ class Qwen2Model(nn.Module):
             "check_layers":[1],
             "check": False,
             "collect": False,
+            "collect_forward_attn": False,
             "recomp_ratio":0.4,
             "kv_cache_dtype": None,
             "attn_bias": None,

@@ -21,6 +21,7 @@ from matplotlib import font_manager
 import traceback
 import multiprocessing as mp
 from functools import partial
+from typing import List
 
 # download the font files and save in this fold
 font_path = "/root/code/vllm_plus/examples/dataset/data/fonts"
@@ -1100,8 +1101,7 @@ def plot_kv_error_by_window_size(input_path: str, save_path: str = "examples/pip
     
     print(f"\n图表已保存至: {save_path}")
 
-def generate_reuse_output(text_a: str, text_b: str, text_c: str, model_name: str = "Qwen/Qwen2.5-7B-Instruct", max_model_len=8192, max_generate_len=512, window_size=3):
-    template = "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant. <|im_end|>\n<|im_start|>user\n{text}\n<|im_end|>\n<|im_start|>assistant\n"
+def generate_reuse_output(text_a: str, text_b: str, text_c: str, template: str, model_name: str = "Qwen/Qwen2.5-7B-Instruct", max_model_len=8192, max_generate_len=512, window_size=7):
     """Compare generation results when reusing KV Cache from text B and C for text A
     
     Args:
@@ -1113,7 +1113,7 @@ def generate_reuse_output(text_a: str, text_b: str, text_c: str, model_name: str
         max_generate_len: Maximum generation length
         
     Returns:
-        dict: Contains generation results, statistics, and KV error data
+        dict: Contains generation results and attention values
     """
     device = "cuda:0"
     pipeline = KVShareNewPipeline(model_name, device, max_model_len)
@@ -1136,11 +1136,6 @@ def generate_reuse_output(text_a: str, text_b: str, text_c: str, model_name: str
         'full_compute': None,
         'reuse_b': None,
         'reuse_c': None,
-        'kv_errors': {
-            'full_compute': None,
-            'reuse_b': None,
-            'reuse_c': None
-        },
         'source_outputs': {
             'b': None,
             'c': None
@@ -1149,33 +1144,41 @@ def generate_reuse_output(text_a: str, text_b: str, text_c: str, model_name: str
             'full_compute': None,
             'reuse_b': None,
             'reuse_c': None
+        },
+        'kv_errors': {
+            'reuse_b': {
+                'key_errors': [],  # 按层统计的Key误差
+                'value_errors': [],  # 按层统计的Value误差
+                'token_key_errors': [],  # 按token位置统计的Key误差
+                'token_value_errors': []  # 按token位置统计的Value误差
+            },
+            'reuse_c': {
+                'key_errors': [],
+                'value_errors': [],
+                'token_key_errors': [],
+                'token_value_errors': []
+            }
         }
     }
     
-    # 1. Full computation of A
-    full_outputs = KVShareNewPipeline.batch_full_compute(
+    # Get full computation KV cache as baseline
+    full_kv_cache, full_outputs, _, full_attn = KVShareNewPipeline.get_kvcache_by_full_compute(
         pipeline.model,
         SamplingParams(temperature=0, max_tokens=max_generate_len),
         [prompt_a]
     )
+    results['attention_values']['full_compute'] = full_attn[0]
     results['full_compute'] = full_outputs[0].outputs[0].text
     
-    # Get full computation KV cache as baseline
-    full_kv_cache, full_outputs, _ = KVShareNewPipeline.get_kvcache_by_full_compute(
-        pipeline.model,
-        SamplingParams(temperature=0, max_tokens=1),
-        [prompt_a]
-    )
-    
-    # 2. Get KV cache for B and C
-    source_kv_cache_b, source_outputs_b, _ = KVShareNewPipeline.get_kvcache_by_full_compute(
+    # Get KV cache for B and C
+    source_kv_cache_b, source_outputs_b, _, source_attn_b = KVShareNewPipeline.get_kvcache_by_full_compute(
         pipeline.model,
         SamplingParams(temperature=0, max_tokens=max_generate_len),
         [prompt_b]
     )
     results['source_outputs']['b'] = source_outputs_b[0].outputs[0].text
     
-    source_kv_cache_c, source_outputs_c, _ = KVShareNewPipeline.get_kvcache_by_full_compute(
+    source_kv_cache_c, source_outputs_c, _, source_attn_c = KVShareNewPipeline.get_kvcache_by_full_compute(
         pipeline.model,
         SamplingParams(temperature=0, max_tokens=max_generate_len),
         [prompt_c]
@@ -1185,7 +1188,7 @@ def generate_reuse_output(text_a: str, text_b: str, text_c: str, model_name: str
     source_token_ids_b = [output.prompt_token_ids for output in source_outputs_b]
     source_token_ids_c = [output.prompt_token_ids for output in source_outputs_c]
     
-    # 3. Reuse KV Cache from B
+    # Reuse KV Cache from B
     target_kv_cache_b, reused_indices_b, unreused_indices_b, selected_tokens_b, target_slices_b = KVEditor.batch_kvedit(
         [tokens_a],
         source_token_ids_b,
@@ -1193,7 +1196,7 @@ def generate_reuse_output(text_a: str, text_b: str, text_c: str, model_name: str
         window_size=window_size
     )
     
-    # 4. Reuse KV Cache from C
+    # Reuse KV Cache from C
     target_kv_cache_c, reused_indices_c, unreused_indices_c, selected_tokens_c, target_slices_c = KVEditor.batch_kvedit(
         [tokens_a],
         source_token_ids_c,
@@ -1203,8 +1206,8 @@ def generate_reuse_output(text_a: str, text_b: str, text_c: str, model_name: str
     
     max_request_id = int(source_outputs_c[0].request_id)
     
-    # 5. Generate using B's KV Cache
-    outputs_b, partial_kv_cache_b = KVShareNewPipeline.partial_compute(
+    # Generate using B's KV Cache
+    outputs_b, partial_kv_cache_b, batch_attn_b = KVShareNewPipeline.partial_compute(
         pipeline.model,
         SamplingParams(temperature=0, max_tokens=max_generate_len),
         [prompt_a],
@@ -1215,32 +1218,34 @@ def generate_reuse_output(text_a: str, text_b: str, text_c: str, model_name: str
         target_slices_b,
         [max_request_id+1]
     )
+    results['attention_values']['reuse_b'] = batch_attn_b[0]
     
-    # Calculate KV errors for B
-    key_error_b = torch.abs(full_kv_cache[:,0,:,:] - partial_kv_cache_b[:,0,:,:])
-    value_error_b = torch.abs(full_kv_cache[:,1,:,:] - partial_kv_cache_b[:,1,:,:])
+    # 计算B的KV误差
+    # 按层统计误差
+    num_layers = full_kv_cache.shape[0]
+    for layer_idx in range(num_layers):
+        # Key误差
+        key_error = torch.abs(full_kv_cache[layer_idx, 0] - partial_kv_cache_b[layer_idx, 0])
+        results['kv_errors']['reuse_b']['key_errors'].append(torch.mean(key_error).item())
+        
+        # Value误差
+        value_error = torch.abs(full_kv_cache[layer_idx, 1] - partial_kv_cache_b[layer_idx, 1])
+        results['kv_errors']['reuse_b']['value_errors'].append(torch.mean(value_error).item())
     
-    # Calculate average error per layer
-    layer_key_errors_b = torch.mean(key_error_b, dim=[1,2]).cpu().numpy()
-    layer_value_errors_b = torch.mean(value_error_b, dim=[1,2]).cpu().numpy()
-    
-    # Calculate average error per token
-    token_key_errors_b = torch.mean(key_error_b, dim=[0,2]).cpu().numpy()
-    token_value_errors_b = torch.mean(value_error_b, dim=[0,2]).cpu().numpy()
-    
-    # Get attention values for B
-    last_layer_idx = len(pipeline.model.llm_engine.model_executor.driver_worker.model_runner.model.model.layers) - 1
-    last_layer = pipeline.model.llm_engine.model_executor.driver_worker.model_runner.model.model.layers[last_layer_idx]
-    # attention_values_b = {
-    #     'query': last_layer.self_attn.hack_q.cpu().numpy(),
-    #     'key': last_layer.self_attn.hack_k.cpu().numpy(),
-    #     'value': last_layer.self_attn.hack_v.cpu().numpy()
-    # }
+    # 按token位置统计误差
+    for token_idx in range(len(tokens_a)):
+        # Key误差
+        key_error = torch.abs(full_kv_cache[:, 0, token_idx] - partial_kv_cache_b[:, 0, token_idx])
+        results['kv_errors']['reuse_b']['token_key_errors'].append(torch.mean(key_error).item())
+        
+        # Value误差
+        value_error = torch.abs(full_kv_cache[:, 1, token_idx] - partial_kv_cache_b[:, 1, token_idx])
+        results['kv_errors']['reuse_b']['token_value_errors'].append(torch.mean(value_error).item())
     
     max_request_id = int(outputs_b[0].request_id)
     
-    # 6. Generate using C's KV Cache
-    outputs_c, partial_kv_cache_c = KVShareNewPipeline.partial_compute(
+    # Generate using C's KV Cache
+    outputs_c, partial_kv_cache_c, batch_attn_c = KVShareNewPipeline.partial_compute(
         pipeline.model,
         SamplingParams(temperature=0, max_tokens=max_generate_len),
         [prompt_a],
@@ -1251,67 +1256,45 @@ def generate_reuse_output(text_a: str, text_b: str, text_c: str, model_name: str
         target_slices_c,
         [max_request_id+1]
     )
+    results['attention_values']['reuse_c'] = batch_attn_c[0]
     
-    # Calculate KV errors for C
-    key_error_c = torch.abs(full_kv_cache[:,0,:,:] - partial_kv_cache_c[:,0,:,:])
-    value_error_c = torch.abs(full_kv_cache[:,1,:,:] - partial_kv_cache_c[:,1,:,:])
+    # 计算C的KV误差
+    # 按层统计误差
+    for layer_idx in range(num_layers):
+        # Key误差
+        key_error = torch.abs(full_kv_cache[layer_idx, 0] - partial_kv_cache_c[layer_idx, 0])
+        results['kv_errors']['reuse_c']['key_errors'].append(torch.mean(key_error).item())
+        
+        # Value误差
+        value_error = torch.abs(full_kv_cache[layer_idx, 1] - partial_kv_cache_c[layer_idx, 1])
+        results['kv_errors']['reuse_c']['value_errors'].append(torch.mean(value_error).item())
     
-    # Calculate average error per layer
-    layer_key_errors_c = torch.mean(key_error_c, dim=[1,2]).cpu().numpy()
-    layer_value_errors_c = torch.mean(value_error_c, dim=[1,2]).cpu().numpy()
+    # 按token位置统计误差
+    for token_idx in range(len(tokens_a)):
+        # Key误差
+        key_error = torch.abs(full_kv_cache[:, 0, token_idx] - partial_kv_cache_c[:, 0, token_idx])
+        results['kv_errors']['reuse_c']['token_key_errors'].append(torch.mean(key_error).item())
+        
+        # Value误差
+        value_error = torch.abs(full_kv_cache[:, 1, token_idx] - partial_kv_cache_c[:, 1, token_idx])
+        results['kv_errors']['reuse_c']['token_value_errors'].append(torch.mean(value_error).item())
     
-    # Calculate average error per token
-    token_key_errors_c = torch.mean(key_error_c, dim=[0,2]).cpu().numpy()
-    token_value_errors_c = torch.mean(value_error_c, dim=[0,2]).cpu().numpy()
-    
-    # # Get attention values for C
-    # attention_values_c = {
-    #     'query': last_layer.self_attn.hack_q.cpu().numpy(),
-    #     'key': last_layer.self_attn.hack_k.cpu().numpy(),
-    #     'value': last_layer.self_attn.hack_v.cpu().numpy()
-    # }
-    
-    # # Get attention values for full compute
-    # attention_values_full = {
-    #     'query': last_layer.self_attn.hack_q.cpu().numpy(),
-    #     'key': last_layer.self_attn.hack_k.cpu().numpy(),
-    #     'value': last_layer.self_attn.hack_v.cpu().numpy()
-    # }
-    
-    # 7. Save results
+    # Save results
     results['reuse_b'] = {
         'output': outputs_b[0].outputs[0].text,
         'reused_tokens': len(reused_indices_b[0]),
         'unreused_tokens': len(unreused_indices_b[0]),
-        'reused_indices': reused_indices_b[0]  # Save reused token indices
+        'reused_indices': reused_indices_b[0],
+        'unreused_indices': unreused_indices_b[0]
     }
     
     results['reuse_c'] = {
         'output': outputs_c[0].outputs[0].text,
         'reused_tokens': len(reused_indices_c[0]),
         'unreused_tokens': len(unreused_indices_c[0]),
-        'reused_indices': reused_indices_c[0]  # Save reused token indices
+        'reused_indices': reused_indices_c[0],
+        'unreused_indices': unreused_indices_c[0]
     }
-    
-    # Save KV error data
-    results['kv_errors']['reuse_b'] = {
-        'key_errors': layer_key_errors_b,
-        'value_errors': layer_value_errors_b,
-        'token_key_errors': token_key_errors_b,
-        'token_value_errors': token_value_errors_b
-    }
-    
-    results['kv_errors']['reuse_c'] = {
-        'key_errors': layer_key_errors_c,
-        'value_errors': layer_value_errors_c,
-        'token_key_errors': token_key_errors_c,
-        'token_value_errors': token_value_errors_c
-    }
-    
-    # Save attention values
-    # results['attention_values']['full_compute'] = attention_values_full
-    # results['attention_values']['reuse_b'] = attention_values_b
-    # results['attention_values']['reuse_c'] = attention_values_c
     
     # Save token IDs for visualization
     results['token_ids'] = tokens_a
@@ -1338,14 +1321,14 @@ def print_reuse_results(results: dict):
     
     print("\nReusing Text B Result:")
     print("-" * 50)
-    print(f"Reused tokens: {results['reuse_b']['reused_tokens']}")
-    print(f"Unreused tokens: {results['reuse_b']['unreused_tokens']}")
+    # print(f"Reused tokens: {results['reuse_b']['reused_tokens']}")
+    # print(f"Unreused tokens: {results['reuse_b']['unreused_tokens']}")
     print(f"Generated output: {results['reuse_b']['output']}")
     
     print("\nReusing Text C Result:")
     print("-" * 50)
-    print(f"Reused tokens: {results['reuse_c']['reused_tokens']}")
-    print(f"Unreused tokens: {results['reuse_c']['unreused_tokens']}")
+    # print(f"Reused tokens: {results['reuse_c']['reused_tokens']}")
+    # print(f"Unreused tokens: {results['reuse_c']['unreused_tokens']}")
     print(f"Generated output: {results['reuse_c']['output']}")
 
 def plot_kv_error_comparison(results: dict, save_path: str = "examples/pipeline/images/kv_error_comparison.png"):
@@ -1403,163 +1386,431 @@ def plot_kv_error_comparison(results: dict, save_path: str = "examples/pipeline/
     print(f"\nFigure saved to: {save_path}")
 
 def plot_token_kv_errors(results: dict, tokenizer, save_path: str = "examples/pipeline/images/token_kv_errors.png"):
-    """Visualize KV errors for each token position with token words
+    """可视化每个token位置的Key和Value误差趋势
     
     Args:
-        results: Return value from generate_reuse_output
-        tokenizer: Tokenizer used for decoding tokens
-        save_path: Path to save the image
+        results: generate_reuse_output的返回结果
+        tokenizer: 用于解码token的tokenizer
+        save_path: 保存图片的路径
     """
-    # Create figure with larger size to accommodate token labels
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(20, 12))
-    
-    # Get token positions and words
-    num_tokens = len(results['kv_errors']['reuse_b']['token_key_errors'])
-    token_positions = range(num_tokens)
-    
-    # Decode tokens to words
+    # 获取token对应的单词
     token_words = [tokenizer.decode([token]) for token in results['token_ids']]
     
-    # Get reused token indices
-    reused_indices_b = results['reuse_b']['reused_indices']
-    reused_indices_c = results['reuse_c']['reused_indices']
+    # 创建图表
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 10))
     
-    # Create second x-axis for both subplots
-    ax1_top = ax1.twiny()
-    ax2_top = ax2.twiny()
+    # 获取误差数据
+    token_key_errors_b = results['kv_errors']['reuse_b']['token_key_errors']
+    token_value_errors_b = results['kv_errors']['reuse_b']['token_value_errors']
+    token_key_errors_c = results['kv_errors']['reuse_c']['token_key_errors']
+    token_value_errors_c = results['kv_errors']['reuse_c']['token_value_errors']
     
-    # Plot Key error by token position
-    ax1.plot(token_positions, results['kv_errors']['reuse_b']['token_key_errors'], 'o-', label='Reused key of B', color='blue')
-    ax1.plot(token_positions, results['kv_errors']['reuse_c']['token_key_errors'], 's--', label='Reused key of C', color='red')
-    
+    # 绘制Key误差趋势
+    ax1.plot(token_key_errors_b, 'o-', label='Reuse B', color='blue')
+    ax1.plot(token_key_errors_c, 's--', label='Reuse C', color='red')
     ax1.set_title('Key Error by Token Position')
     ax1.set_xlabel('Token Position')
-    ax1.set_ylabel('Average Error')
+    ax1.set_ylabel('Average Key Error')
+    ax1.set_xticks(range(len(token_words)))
+    ax1.set_xticklabels(token_words, rotation=45, ha='right')
     ax1.legend()
     ax1.grid(True, alpha=0.3)
     
-    # Plot Value error by token position
-    ax2.plot(token_positions, results['kv_errors']['reuse_b']['token_value_errors'], 'o-', label='Reused value of B', color='blue')
-    ax2.plot(token_positions, results['kv_errors']['reuse_c']['token_value_errors'], 's--', label='Reused value of C', color='red')
-    
+    # 绘制Value误差趋势
+    ax2.plot(token_value_errors_b, 'o-', label='Reuse B', color='blue')
+    ax2.plot(token_value_errors_c, 's--', label='Reuse C', color='red')
     ax2.set_title('Value Error by Token Position')
     ax2.set_xlabel('Token Position')
-    ax2.set_ylabel('Average Error')
+    ax2.set_ylabel('Average Value Error')
+    ax2.set_xticks(range(len(token_words)))
+    ax2.set_xticklabels(token_words, rotation=45, ha='right')
     ax2.legend()
     ax2.grid(True, alpha=0.3)
     
-    # Set x-axis labels for top axis (B's tokens) in both subplots
-    ax1_top.set_xticks(token_positions)
-    ax1_top.set_xticklabels(token_words, rotation=70, ha='right')
-    ax2_top.set_xticks(token_positions)
-    ax2_top.set_xticklabels(token_words, rotation=70, ha='right')
-    
-    # Set x-axis labels for bottom axis (C's tokens) in both subplots
-    ax1.set_xticks(token_positions)
-    ax1.set_xticklabels(token_words, rotation=70, ha='right')
-    ax2.set_xticks(token_positions)
-    ax2.set_xticklabels(token_words, rotation=70, ha='right')
-    
-    # Set different colors for reused and unreused tokens in both subplots
-    for idx, label in enumerate(ax1_top.get_xticklabels()):
-        if idx in reused_indices_b:
-            label.set_color('blue')
-        else:
-            label.set_color('black')
-    
-    for idx, label in enumerate(ax1.get_xticklabels()):
-        if idx in reused_indices_c:
-            label.set_color('red')
-        else:
-            label.set_color('black')
-    
-    for idx, label in enumerate(ax2_top.get_xticklabels()):
-        if idx in reused_indices_b:
-            label.set_color('blue')
-        else:
-            label.set_color('black')
-    
-    for idx, label in enumerate(ax2.get_xticklabels()):
-        if idx in reused_indices_c:
-            label.set_color('red')
-        else:
-            label.set_color('black')
-    
-    # Adjust layout to prevent label cutoff
+    # 调整布局
     plt.tight_layout()
     
-    # Save figure
+    # 保存图片
     plt.savefig(save_path, dpi=300, bbox_inches="tight")
     plt.close()
     
-    # Print token error statistics
-    print("\nToken-level KV Error Statistics:")
+    print(f"Token位置KV误差趋势图已保存至: {save_path}")
+    
+    # 打印统计信息
+    print("\nToken位置KV误差统计信息:")
     print("-" * 50)
-    print("Token\tWord\tReused\tKey Error (B)\tValue Error (B)\tKey Error (C)\tValue Error (C)")
-    print("-" * 120)
+    print("Token\tWord\tKey Error (B)\tValue Error (B)\tKey Error (C)\tValue Error (C)")
+    print("-" * 100)
     
     for pos, word in enumerate(token_words):
-        is_reused_b = pos in reused_indices_b
-        is_reused_c = pos in reused_indices_c
-        reused_status = f"B:{is_reused_b},C:{is_reused_c}"
-        
-        key_error_b = results['kv_errors']['reuse_b']['token_key_errors'][pos]
-        value_error_b = results['kv_errors']['reuse_b']['token_value_errors'][pos]
-        key_error_c = results['kv_errors']['reuse_c']['token_key_errors'][pos]
-        value_error_c = results['kv_errors']['reuse_c']['token_value_errors'][pos]
-        
-        print(f"{pos}\t{word}\t{reused_status}\t{key_error_b:.4f}\t{value_error_b:.4f}\t{key_error_c:.4f}\t{value_error_c:.4f}")
+        print(f"{pos}\t{word}\t{token_key_errors_b[pos]:.4f}\t{token_value_errors_b[pos]:.4f}\t{token_key_errors_c[pos]:.4f}\t{token_value_errors_c[pos]:.4f}")
+
+def plot_cross_attention(results: dict, tokenizer, save_path: str = "examples/pipeline/images/cross_attention.png"):
+    """可视化交叉注意力分数
     
-    print(f"\nFigure saved to: {save_path}")
+    Args:
+        results: generate_reuse_output的返回结果
+        tokenizer: 用于解码token的tokenizer
+        save_path: 保存图片的路径
+    """
+    # 获取token对应的单词
+    token_words = [tokenizer.decode([token]) for token in results['token_ids']]
+    
+    # 获取unreused indices
+    unreused_indices_b = results['reuse_b']['unreused_indices']
+    unreused_indices_c = results['reuse_c']['unreused_indices']
+    token_words_b = [token_words[i] for i in unreused_indices_b]
+    token_words_c = [token_words[i] for i in unreused_indices_c]
+    
+    # 处理full attention
+    full_attn = results['attention_values']['full_compute']
+    if torch.is_tensor(full_attn):
+        full_attn = full_attn.cpu().numpy()
+    num_head, num_token, _ = full_attn.shape
+    
+    # 处理B attention
+    b_attn = results['attention_values']['reuse_b']
+    if torch.is_tensor(b_attn):
+        b_attn = b_attn.cpu().numpy()
+    
+    # 处理C attention
+    c_attn = results['attention_values']['reuse_c']
+    if torch.is_tensor(c_attn):
+        c_attn = c_attn.cpu().numpy()
+    
+    # 实现softmax
+    def softmax(x, axis=-1):
+        # 减去最大值以提高数值稳定性
+        x_max = np.max(x, axis=axis, keepdims=True)
+        x_exp = np.exp(x - x_max)
+        return x_exp / np.sum(x_exp, axis=axis, keepdims=True)
+    
+    # 应用softmax
+    full_attn = softmax(full_attn, axis=-1)
+    b_attn = softmax(b_attn, axis=-1)
+    c_attn = softmax(c_attn, axis=-1)
+    
+    # 为每个head生成热力图
+    for head_idx in range(num_head):
+        # 创建2x2的子图
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(20, 12))
+        
+        # 选择当前head的注意力值
+        full_attn_b = full_attn[head_idx][unreused_indices_b, :]  # [num_unreused, num_token]
+        full_attn_c = full_attn[head_idx][unreused_indices_c, :]  # [num_unreused, num_token]
+        b_attn_current = b_attn[head_idx][:, :]  # [num_token, num_token]
+        c_attn_current = c_attn[head_idx][:, :]  # [num_token, num_token]
+        
+        # 绘制full compute的注意力热力图 (B)
+        sns.heatmap(full_attn_b, ax=ax1, cmap='viridis')
+        ax1.set_title(f'Full Compute Cross Attention (Head {head_idx}) - Unreused Tokens B')
+        ax1.set_xticks(range(len(token_words)))
+        ax1.set_xticklabels(token_words, rotation=90, ha='right')
+        ax1.set_yticks(range(len(token_words_b)))
+        ax1.set_yticklabels(token_words_b, rotation=0, ha='right')
+        ax1.set_xlabel('All Tokens')
+        ax1.set_ylabel('Unreused Tokens (B)')
+        
+        # 绘制full compute的注意力热力图 (C)
+        sns.heatmap(full_attn_c, ax=ax2, cmap='viridis')
+        ax2.set_title(f'Full Compute Cross Attention (Head {head_idx}) - Unreused Tokens C')
+        ax2.set_xticks(range(len(token_words)))
+        ax2.set_xticklabels(token_words, rotation=90, ha='right')
+        ax2.set_yticks(range(len(token_words_c)))
+        ax2.set_yticklabels(token_words_c, rotation=0, ha='right')
+        ax2.set_xlabel('All Tokens')
+        ax2.set_ylabel('Unreused Tokens (C)')
+        
+        # 绘制B的注意力热力图
+        sns.heatmap(b_attn_current, ax=ax3, cmap='viridis')
+        ax3.set_title(f'Reuse B Cross Attention (Head {head_idx}) - Unreused Tokens')
+        ax3.set_xticks(range(len(token_words)))
+        ax3.set_xticklabels(token_words, rotation=90, ha='right')
+        ax3.set_yticks(range(len(token_words_b)))
+        ax3.set_yticklabels(token_words_b, rotation=0, ha='right')
+        ax3.set_xlabel('All Tokens')
+        ax3.set_ylabel('Unreused Tokens (B)')
+        
+        # 绘制C的注意力热力图
+        sns.heatmap(c_attn_current, ax=ax4, cmap='viridis')
+        ax4.set_title(f'Reuse C Cross Attention (Head {head_idx}) - Unreused Tokens')
+        ax4.set_xticks(range(len(token_words)))
+        ax4.set_xticklabels(token_words, rotation=90, ha='right')
+        ax4.set_yticks(range(len(token_words_c)))
+        ax4.set_yticklabels(token_words_c, rotation=0, ha='right')
+        ax4.set_xlabel('All Tokens')
+        ax4.set_ylabel('Unreused Tokens (C)')
+        
+        # 调整布局
+        plt.tight_layout()
+        
+        # 为每个head保存单独的图片
+        head_save_path = save_path.replace('.png', f'_head_{head_idx}.png')
+        plt.savefig(head_save_path, dpi=300, bbox_inches="tight")
+        plt.close()
+        
+        print(f"Head {head_idx}的交叉注意力热力图已保存至: {head_save_path}")
+    
+    print(f"所有head的交叉注意力热力图已保存完成")
+
+def save_results_to_cache(results: dict, cache_path: str = "examples/pipeline/cache/results_cache.json"):
+    """保存results结果到缓存文件
+    
+    Args:
+        results: generate_reuse_output的返回结果
+        cache_path: 缓存文件路径
+    """
+    # 确保目录存在
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    
+    # 将numpy数组转换为列表
+    cache_data = {
+        'full_compute': results['full_compute'],
+        'reuse_b': results['reuse_b'],
+        'reuse_c': results['reuse_c'],
+        'source_outputs': results['source_outputs'],
+        'token_ids': results['token_ids'],
+        'attention_values': {
+            'full_compute': results['attention_values']['full_compute'].tolist(),
+            'reuse_b': results['attention_values']['reuse_b'].tolist(),
+            'reuse_c': results['attention_values']['reuse_c'].tolist()
+        },
+        'kv_errors': {
+            'reuse_b': {
+                'key_errors': results['kv_errors']['reuse_b']['key_errors'],
+                'value_errors': results['kv_errors']['reuse_b']['value_errors'],
+                'token_key_errors': results['kv_errors']['reuse_b']['token_key_errors'],
+                'token_value_errors': results['kv_errors']['reuse_b']['token_value_errors']
+            },
+            'reuse_c': {
+                'key_errors': results['kv_errors']['reuse_c']['key_errors'],
+                'value_errors': results['kv_errors']['reuse_c']['value_errors'],
+                'token_key_errors': results['kv_errors']['reuse_c']['token_key_errors'],
+                'token_value_errors': results['kv_errors']['reuse_c']['token_value_errors']
+            }
+        }
+    }
+    
+    # 保存到JSON文件
+    with open(cache_path, 'w') as f:
+        json.dump(cache_data, f, indent=4)
+    
+    print(f"Results已保存至: {cache_path}")
+
+def load_results_from_cache(cache_path: str = "examples/pipeline/cache/results_cache.json") -> dict:
+    """从缓存文件加载results结果
+    
+    Args:
+        cache_path: 缓存文件路径
+        
+    Returns:
+        dict: 加载的results结果
+    """
+    if not os.path.exists(cache_path):
+        raise FileNotFoundError(f"缓存文件不存在: {cache_path}")
+    
+    # 从JSON文件加载
+    with open(cache_path, 'r') as f:
+        cache_data = json.load(f)
+    
+    # 将列表转换回numpy数组
+    results = {
+        'full_compute': cache_data['full_compute'],
+        'reuse_b': cache_data['reuse_b'],
+        'reuse_c': cache_data['reuse_c'],
+        'source_outputs': cache_data['source_outputs'],
+        'token_ids': cache_data['token_ids'],
+        'attention_values': {
+            'full_compute': np.array(cache_data['attention_values']['full_compute']),
+            'reuse_b': np.array(cache_data['attention_values']['reuse_b']),
+            'reuse_c': np.array(cache_data['attention_values']['reuse_c'])
+        },
+        'kv_errors': {
+            'reuse_b': {
+                'key_errors': np.array(cache_data['kv_errors']['reuse_b']['key_errors']),
+                'value_errors': np.array(cache_data['kv_errors']['reuse_b']['value_errors']),
+                'token_key_errors': np.array(cache_data['kv_errors']['reuse_b']['token_key_errors']),
+                'token_value_errors': np.array(cache_data['kv_errors']['reuse_b']['token_value_errors'])
+            },
+            'reuse_c': {
+                'key_errors': np.array(cache_data['kv_errors']['reuse_c']['key_errors']),
+                'value_errors': np.array(cache_data['kv_errors']['reuse_c']['value_errors']),
+                'token_key_errors': np.array(cache_data['kv_errors']['reuse_c']['token_key_errors']),
+                'token_value_errors': np.array(cache_data['kv_errors']['reuse_c']['token_value_errors'])
+            }
+        }
+    }
+    
+    print(f"Results已从 {cache_path} 加载")
+    return results
+
+# def plot_attention_matrix(results: dict, 
+#                         tokenizer,
+#                         save_path: str = "examples/pipeline/images/attention_matrix.png"):
+#     """可视化预填充阶段token之间的注意力分数
+    
+#     Args:
+#         results: generate_reuse_output的返回结果
+#         tokenizer: 用于解码token的tokenizer
+#         save_path: 保存图片的路径
+#     """
+#     # 获取token对应的单词
+#     token_words = [tokenizer.decode([token]) for token in results['token_ids']]
+    
+#     # 获取未复用的位置
+#     unreused_indices_b = results['reuse_b']['unreused_indices']
+#     unreused_indices_c = results['reuse_c']['unreused_indices']
+    
+#     # 创建2x2的子图
+#     fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
+    
+#     # 定义切片范围
+#     s, e = 24, -6
+    
+#     # 获取所有注意力矩阵
+#     full_attn = results['attention_values']['full_compute'][:, :]
+#     b_attn = results['attention_values']['reuse_b'][:, :]
+#     c_attn = results['attention_values']['reuse_c'][:, :]
+    
+#     # 确保张量在CPU上
+#     if torch.is_tensor(full_attn):
+#         full_attn = full_attn.cpu().numpy()
+#     if torch.is_tensor(b_attn):
+#         b_attn = b_attn.cpu().numpy()
+#     if torch.is_tensor(c_attn):
+#         c_attn = c_attn.cpu().numpy()
+    
+#     # 准备标签
+#     visible_tokens = token_words[s:e]
+#     visible_tokens_b = [token_words[i] for i in unreused_indices_b]
+#     visible_tokens_c = [token_words[i] for i in unreused_indices_c]
+    
+#     # 计算full compute attention的最大最小值作为归一化范围
+#     full_attn_b = full_attn[[i for i in unreused_indices_b],:]
+#     full_attn_c = full_attn[[i for i in unreused_indices_c],:]
+    
+#     # 使用full compute attention的最大最小值
+#     global_min = min(full_attn.min(), full_attn.min())
+#     global_max = max(full_attn.max(), full_attn.max())
+    
+#     # 左上：full attn在b indices的注意可视化
+#     normalized_attn = (full_attn_b - global_min) / (global_max - global_min)
+#     sns.heatmap(normalized_attn,
+#                cmap='viridis',
+#                vmin=0,
+#                vmax=1,
+#             #    xticklabels=visible_tokens,
+#                yticklabels=visible_tokens_b,
+#                cbar_kws={'label': 'Normalized Attention Weight'},
+#                ax=ax1)
+#     ax1.set_title(f'Full Compute Attention (B Unreused Tokens)\nRange: [{global_min:.4f}, {global_max:.4f}]')
+#     ax1.set_xlabel('Prefill Token')
+#     ax1.set_ylabel('Prefill Token (Unreused)')
+#     plt.setp(ax1.get_xticklabels(), rotation=45, ha='right')
+#     plt.setp(ax1.get_yticklabels(), rotation=0, ha='right')
+    
+#     # 右上：full attn的注意力可视化（与C的未复用token对齐）
+#     normalized_attn = (full_attn_c - global_min) / (global_max - global_min)
+#     sns.heatmap(normalized_attn,
+#                cmap='viridis',
+#                vmin=0,
+#                vmax=1,
+#             #    xticklabels=visible_tokens,
+#                yticklabels=visible_tokens_c,
+#                cbar_kws={'label': 'Normalized Attention Weight'},
+#                ax=ax2)
+#     ax2.set_title(f'Full Compute Attention (C Unreused Tokens)\nRange: [{global_min:.4f}, {global_max:.4f}]')
+#     ax2.set_xlabel('Prefill Token')
+#     ax2.set_ylabel('Prefill Token (Unreused)')
+#     plt.setp(ax2.get_xticklabels(), rotation=45, ha='right')
+#     plt.setp(ax2.get_yticklabels(), rotation=0, ha='right')
+    
+#     # 左下：B的注意力矩阵
+#     normalized_attn = (b_attn - global_min) / (global_max - global_min)
+#     sns.heatmap(normalized_attn,
+#                cmap='viridis',
+#                vmin=0,
+#                vmax=1,
+#             #    xticklabels=visible_tokens_b,
+#                yticklabels=visible_tokens_b,
+#                cbar_kws={'label': 'Normalized Attention Weight'},
+#                ax=ax3)
+#     ax3.set_title(f'Reuse B Attention\nRange: [{global_min:.4f}, {global_max:.4f}]')
+#     ax3.set_xlabel('Prefill Token')
+#     ax3.set_ylabel('Prefill Token (Unreused)')
+#     plt.setp(ax3.get_xticklabels(), rotation=45, ha='right')
+#     plt.setp(ax3.get_yticklabels(), rotation=0, ha='right')
+    
+#     # 右下：C的注意力矩阵
+#     normalized_attn = (c_attn - global_min) / (global_max - global_min)
+#     sns.heatmap(normalized_attn,
+#                cmap='viridis',
+#                vmin=0,
+#                vmax=1,
+#             #    xticklabels=visible_tokens_c,
+#                yticklabels=visible_tokens_c,
+#                cbar_kws={'label': 'Normalized Attention Weight'},
+#                ax=ax4)
+#     ax4.set_title(f'Reuse C Attention\nRange: [{global_min:.4f}, {global_max:.4f}]')
+#     ax4.set_xlabel('Prefill Token')
+#     ax4.set_ylabel('Prefill Token (Unreused)')
+#     plt.setp(ax4.get_xticklabels(), rotation=45, ha='right')
+#     plt.setp(ax4.get_yticklabels(), rotation=0, ha='right')
+    
+#     # 调整布局
+#     plt.tight_layout()
+    
+#     # 保存图片
+#     plt.savefig(save_path, dpi=300, bbox_inches="tight")
+#     plt.close()
+    
+#     print(f"\nAttention error heatmap已保存至: {save_path}")
 
 # 使用示例
 if __name__ == "__main__":
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     os.environ["VLLM_USE_MODELSCOPE"]="True"
     
-    # # 示例文本
-    # text_a = "List: durian, apple, banana, pineapple, orange. How many different kinds of fruits appeared in the previous text?"
-    # text_b = "List: grape, pineapple, orange, apple, banana, peach, watermelon. Which kind of fruit has a lower calorie content?"
-    # text_c = "List: watermelon, grape, apple, banana, pineapple, orange. Which kind of fruit has a lower calorie content?"
-    
-    # text_a = "List: durian, durian, apple, banana, pineapple, orange. How many different kinds of fruits appeared in the previous text? Count repeated fruits only once."
-    # text_b = "List: grape / pineapple / orange / apple, banana / peach / watermelon. Which kind of fruit has a lower calorie content?"
-    # text_c = "List: watermelon / grape / apple / banana, pineapple / orange. Which kind of fruit has a lower calorie content?"
-    
-    # 对于term来说，复用的token的边界可能都会损失
-    # text_a = "List: lemon, pomelo, pineapple, banana, apple, orange, watermelon. How many different kinds of fruits appeared in the previous text? Count repeated fruits only once."
-    # text_b = "List: grape / watermelon / apple, orange / banana. Which kind of fruit has a lower calorie content?"
-    # text_c = "List: grape / apple, orange / banana / grape.  Which kind of fruit has a lower calorie content?"
-    
-    # 连续复用的过多会导致注意力损失很多
-    text_a = "List: lemon, pomelo, pineapple, banana, apple, orange. How many different kinds of fruits appeared in the previous text? Count repeated fruits only once."
-    # text_b = "List: grape / durian / peach / watermelon. How many different kinds of fruits appeared in the previous text? Count repeated fruits only once."
-    text_c = "List: banana, apple, orange, grape, durian, peach, watermelon. How many different kinds of fruits appeared in the previous text? Count repeated fruits only once."
-    text_c = "List: lemon, pomelo, pineapple. How many different kinds of fruits appeared in the previous text? Count repeated fruits only once."
-    # text_c = "List: banana, apple, orange. How many different kinds of fruits appeared in the previous text? Count repeated fruits only once."
-    #  pitaya, strawberry, cantaloupe, pear, watermelon, pineapple, peach, durian, 
-    text_a = "lemon, pomelo, banana, apple, orange. How many different kinds of fruits mentioned in the text? Count repeated fruits only once."
-    text_b = "peach, watermelon, banana, apple. Which kind of fruit has a lower calorie content?"
-    # text_c = "List: pineapple, banana / lemon / apple, orange. Which kind of fruit has a lower calorie content?"
-    # text_c = "List: lemon, pomelo. Which kind of fruit has a lower calorie content?"
-    text_c = "lemon, orange. How many different kinds of fruits mentioned in the text? Count repeated fruits only once."
+    # text_a = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27. In the sequence of numbers, what is the median number?"
+    # text_b = "1, 2, 4, 5, 7, 8, 10, 11, 13, 14, 16, 17, 19, 20, 22, 23, 25, 26. In the sequence of numbers, what is the median number?"
+    # text_c = "In the sequence of numbers, what is the median number?"
+    # text_a = "apple, banana, orange, pear, pineapple, mango, strawberry, kiwi, grape, watermelon. How many fruits are there in the sequence?"
+    # text_b = "apple, watermelon.How many fruits are there in the sequence?"
+    # text_c = "apple, banana, orange, grape, watermelon. How many fruits are there in the sequence?"
 
-    # text_a = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27. How many numbers are mentioned in the sequence?"
-    # text_b = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27. How many numbers are mentioned in the sequence?"
-    # text_c = "27. How many numbers are mentioned in the sequence?"
+    # text_a = "Please help me analyze the personality traits of the character Jon Snow in A Song of Ice and Fire."
+    # text_b = "Lin Daiyu in Dream of the Red Chamber. Please help me analyze the personality traits of the character."
+    # text_c = "Daenerys Targaryen in A Song of Ice and Fire. Please help me analyze the personality traits of the character."
     
-    text_a = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27. In the sequence of numbers, what is the median number?"
-    text_b = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27. In the sequence of numbers, what is the median number?"
-    text_c = "27. In the sequence of numbers, what is the median number?"
-
-
+    # text_a = "Albert is wondering how much pizza he can eat in one day. He buys 2 large pizzas and 2 small pizzas. A large pizza has 16 slices and a small pizza has 8 slices. If he eats it all, how many pieces does he eat that day? "
+    # text_b = "He buys 5 large pizzas and 6 small pizzas. A large pizza has 9 slices and a small pizza has 6 slices. If he eats it all, how many pieces does he eat that day? "
+    # text_c = "He buys 3 large pizzas and 4 small pizzas. A large pizza has 9 slices and a small pizza has 6 slices."
     
+    text_a = "Buses arrive at a stop every 8 minutes starting at 8:00 AM, forming a time sequence: 8:00, 8:08, 10:00 AM. How many buses arrive between 8:30 AM and 9:30 AM, and what is the median arrival time in this interval?"
+    text_b = "Buses arrive at a stop every 6 minutes starting at 8:00 AM, forming a time sequence: 8:00, 8:06, 10:00 AM. How many buses arrive between 8:40 AM and 9:20 AM, and what is the median arrival time in this interval?"
+    text_c = "Buses arrive at a stop every 4 minutes starting at 8:00 AM, forming a time sequence: 8:00, 8:04, 10:00 AM. How many buses arrive between 8:30 AM and 9:30 AM, and what is the median arrival time in this interval?"
+    
+    
+    template = "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant. <|im_end|>\n<|im_start|>user\n{text}\n<|im_end|>\n<|im_start|>assistant\n"
     model_name = "Qwen/Qwen2.5-7B-Instruct-GPTQ-Int4"
-    results = generate_reuse_output(text_a, text_b, text_c, model_name,window_size=5)
-    print_reuse_results(results)
-    # plot_kv_error_comparison(results)
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    plot_token_kv_errors(results, tokenizer)
+
+    # 检查缓存文件是否存在
+    cache_path = "examples/pipeline/cache/results_cache.json"
+    if os.path.exists(cache_path):
+        # 如果缓存存在,直接加载
+        results = load_results_from_cache(cache_path)
+    else:
+        # 如果缓存不存在,重新计算并保存
+        results = generate_reuse_output(text_a, text_b, text_c, template, model_name,window_size=5)
+        save_results_to_cache(results, cache_path)
     
+    print_reuse_results(results)
+    
+    # 可视化交叉注意力
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    plot_cross_attention(results, tokenizer)
+    plot_token_kv_errors(results, tokenizer)
+    # plot_attention_matrix(results, tokenizer)
+    # plot_attention_error(results, tokenizer, num_decode_tokens=4)
     # plot_kv_error_by_window_size("examples/dataset/data/opus/opus_dataset_en-zh_similar_docs_top50_250405_windows_output_qwen2.5-32b.json", "examples/pipeline/images/kv_error_by_window_size.png")
     
