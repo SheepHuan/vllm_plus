@@ -434,6 +434,9 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: TorchSDPAMetadata,  # type: ignore
+        status,
+        cache_fuse_metadata:dict,
+        old_kv,
         k_scale: float = 1.0,
         v_scale: float = 1.0,
         output: Optional[torch.Tensor] = None,
@@ -472,6 +475,65 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         else:
             assert value is None
 
+        if status in [1, 2]:
+            # Huan: 预缓存的key和value的形状需要调整
+            key_old = old_kv[0].view(-1, self.num_kv_heads, self.head_size)
+            value_old = old_kv[1].view(-1, self.num_kv_heads, self.head_size)
+
+        if status in [1]:
+            # FIXME: 需要修改,防止出现additional_map_indices为空的情况
+            if  cache_fuse_metadata["use_additional_indices"]:
+                # cache_fuse_metadata["imp_indices"] = torch.tensor(list(range(0,key.shape[0])),device=query.device)
+                # # 去除前缀和后缀
+                if cache_fuse_metadata["enable_cacheblend"]:
+                    old_kv_map_indices =torch.sort(cache_fuse_metadata["old_kv_map_indices"])[0]
+                    topk_error_num = max(2,int(0.6*len(old_kv_map_indices)))
+                    temp_diff = torch.sum((value[old_kv_map_indices,:,:]-value_old[old_kv_map_indices,:,:])**2, dim=[1,2])
+                    top_indices = torch.topk(temp_diff, k=topk_error_num).indices
+                    top_indices = torch.cat([old_kv_map_indices[top_indices],cache_fuse_metadata["additional_map_indices"]])
+                    top_indices = torch.unique(top_indices)
+                    top_indices,_ = torch.sort(top_indices)
+                    cache_fuse_metadata["imp_indices"] = top_indices
+                    query = query[top_indices,:,:]
+                    # attn_bias = LowerTriangularFromBottomRightMask()
+                    cache_fuse_metadata["attn_bias"] = attn_bias
+                    attn_metadata.prefill_metadata.attn_bias=None
+                elif cache_fuse_metadata["enable_kvshare"]:
+                    pass
+                elif cache_fuse_metadata["enable_only_compute_unreused"]:
+                    top_indices = cache_fuse_metadata["additional_map_indices"]
+                    
+                    cache_fuse_metadata["imp_indices"] = top_indices
+                    query = query[top_indices,:,:]
+                    batch_prompt_slice = cache_fuse_metadata["batch_prompt_slice"]
+                    
+                    attn_bias = torch.ones(query.shape[0],old_kv[0].shape[0],device=query.device,dtype=query.dtype) * torch.inf * -1
+                    for idx,index in enumerate(top_indices):
+                        for i in range(len(batch_prompt_slice)):
+                            if index >= batch_prompt_slice[i][0] and index < batch_prompt_slice[i][1]:
+                                attn_bias[idx,batch_prompt_slice[i][0]:index+1] = 1
+                        # attn_bias[:,batch_prompt_slice[i][0]:batch_prompt_slice[i][1]] = 0
+                    
+                    cache_fuse_metadata["attn_bias"] = attn_bias
+                    attn_metadata.prefill_metadata.attn_bias=None
+            else:
+                pass
+            pass
+            
+            
+        cache_fuse_metadata["kv_cache_dtype"] = value.dtype
+        # Jiayi: whether partial update or full update at check layer
+        if status in [1]:
+            imp_indices = cache_fuse_metadata["imp_indices"]
+            
+        if status in [2]:
+            imp_indices = cache_fuse_metadata["imp_indices"]
+            key_old[imp_indices,:,:] = key
+            value_old[imp_indices,:,:] = value
+
+            key = key_old
+            value = value_old
+            
         if (attn_type != AttentionType.ENCODER and kv_cache.numel() > 0):
             # KV-cache during decoder-self- or
             # encoder-decoder-cross-attention, but not
@@ -586,6 +648,7 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         value: torch.Tensor,
         attn_metadata: TorchSDPAMetadata,
         attn_type: str = AttentionType.DECODER,
+        custom_attn_masks:torch.Tensor = None,
     ) -> None:
         if self.num_kv_heads != self.num_heads:
             key = key.repeat_interleave(self.num_queries_per_kv, dim=1)

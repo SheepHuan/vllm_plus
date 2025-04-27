@@ -170,11 +170,11 @@ if __name__ == "__main__":
     database_path = "examples/dataset/data/database/milvus_xsum.db"
     save_path = f"examples/dataset/data/xsum/{model_name}_train_similar_docs_topk50.json"
     save_path_high_sim = f"examples/dataset/data/xsum/{model_name}_train_similar_docs_topk50_test3.json"
-    # embedding_xsum_dataset(model_name="all-MiniLM-L6-v2",dataset_path="EdinburghNLP/xsum",tag="train",global_id=0)
+    embedding_xsum_dataset(model_name="all-MiniLM-L6-v2",dataset_path="EdinburghNLP/xsum",tag="train",global_id=0)
     # embedding_xsum_dataset(model_name="all-MiniLM-L6-v2",dataset_path="EdinburghNLP/xsum",tag="test",global_id=2100000)                                                     
     # embedding_xsum_dataset(model_name="all-MiniLM-L6-v2",dataset_path="EdinburghNLP/xsum",tag="validation",global_id=2111400)
     # find_xsum_similar_docs(model_name=model_name,dataset_path=dataset_path,database_path=database_path,save_path=save_path)
-    find_the_most_similar_and_max_resued_docs(dataset_path=save_path,save_path=save_path_high_sim)
+    # find_the_most_similar_and_max_resued_docs(dataset_path=save_path,save_path=save_path_high_sim)
     # select_xsum_dataset(dataset_path=save_path,save_path=save_path_high_sim)
     
     

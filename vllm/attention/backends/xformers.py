@@ -344,6 +344,7 @@ class XFormersMetadataBuilder(CommonMetadataBuilder[XFormersMetadata]):
     _metadata_cls = XFormersMetadata
 
 
+
 class XFormersImpl(AttentionImpl[XFormersMetadata]):
     """
     If the input tensors contain prompt tokens, the layout is as follows:
@@ -505,28 +506,43 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         if status in [1]:
             # FIXME: 需要修改,防止出现additional_map_indices为空的情况
             if  cache_fuse_metadata["use_additional_indices"]:
-                top_indices = cache_fuse_metadata["additional_map_indices"]
-                cache_fuse_metadata["imp_indices"] = top_indices
-                query = query[top_indices,:,:]
-                attn_bias = LowerTriangularFromBottomRightMask()
-                cache_fuse_metadata["attn_bias"] = attn_bias
-                attn_metadata.prefill_metadata.attn_bias=None
-                # attn_metadata.query_start_loc = torch.cat([torch.tensor([0],device=cache_fuse_metadata['selected_token_indices'].device),cache_fuse_metadata['selected_token_indices']+1])
-                # attn_metadata.num_prefill_tokens = len(cache_fuse_metadata["additional_map_indices"])
-                # attn_metadata.prefill_metadata.num_prefill_tokens = len(cache_fuse_metadata["additional_map_indices"])
-                # attn_metadata.prefill_metadata.query_start_loc =  attn_metadata.query_start_loc
+                # cache_fuse_metadata["imp_indices"] = torch.tensor(list(range(0,key.shape[0])),device=query.device)
+                # # 去除前缀和后缀
+                if cache_fuse_metadata["enable_cacheblend"]:
+                    old_kv_map_indices =torch.sort(cache_fuse_metadata["old_kv_map_indices"])[0]
+                    topk_error_num = max(2,int(0.6*len(old_kv_map_indices)))
+                    temp_diff = torch.sum((value[old_kv_map_indices,:,:]-value_old[old_kv_map_indices,:,:])**2, dim=[1,2])
+                    top_indices = torch.topk(temp_diff, k=topk_error_num).indices
+                    top_indices = torch.cat([old_kv_map_indices[top_indices],cache_fuse_metadata["additional_map_indices"]])
+                    top_indices = torch.unique(top_indices)
+                    top_indices,_ = torch.sort(top_indices)
+                    cache_fuse_metadata["imp_indices"] = top_indices
+                    query = query[top_indices,:,:]
+                    attn_bias = LowerTriangularFromBottomRightMask()
+                    cache_fuse_metadata["attn_bias"] = attn_bias
+                    attn_metadata.prefill_metadata.attn_bias=None
+                elif cache_fuse_metadata["enable_kvshare"]:
+                    pass
+                elif cache_fuse_metadata["enable_only_compute_unreused"]:
+                    top_indices = cache_fuse_metadata["additional_map_indices"]
+                    
+                    cache_fuse_metadata["imp_indices"] = top_indices
+                    query = query[top_indices,:,:]
+                    batch_prompt_slice = cache_fuse_metadata["batch_prompt_slice"]
+                    
+                   
+                    attn_bias = torch.zeros(1,query.shape[0],old_kv[0].shape[0],device=query.device,dtype=query.dtype)
+                    for idx,index in enumerate(top_indices):
+                        for i in range(len(batch_prompt_slice)):
+                            if index >= batch_prompt_slice[i][0] and index < batch_prompt_slice[i][1]:
+                                attn_bias[:,idx,batch_prompt_slice[i][0]:index+1] = 1
+                       
+                    # attn_bias = attn_bias[:,None,:,:]
+                    # attn_bias = attn_bias.repeat(1,self.num_heads,1,1)
+                    cache_fuse_metadata["attn_bias"] = attn_bias
+                    attn_metadata.prefill_metadata.attn_bias=None
             else:
-                temp_diff = torch.sum((value[:,:,:]-value_old[:,:,:])**2, dim=[1,2])
-                topk_num = int(len(temp_diff)*cache_fuse_metadata["recomp_ratio"])
-                top_indices = torch.topk(temp_diff, k=topk_num).indices
-                top_indices = torch.cat([top_indices,torch.tensor(list(range(key.shape[0]-8,key.shape[0]-1)),device=query.device)])
-                top_indices = torch.unique(top_indices)
-                top_indices,_ = torch.sort(top_indices)
-                query = query[top_indices,:,:]
-                cache_fuse_metadata["imp_indices"] = top_indices
-                attn_bias = LowerTriangularFromBottomRightMask()
-                cache_fuse_metadata["attn_bias"] = attn_bias
-                attn_metadata.prefill_metadata.attn_bias=None
+                pass
             pass
             
             
@@ -537,16 +553,12 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             
         if status in [2]:
             imp_indices = cache_fuse_metadata["imp_indices"]
-            key_old[imp_indices,:,:] = key 
+            key_old[imp_indices,:,:] = key
             value_old[imp_indices,:,:] = value
-            # self.update_kv.append([key,value])
+
             key = key_old
             value = value_old
             
-        
-        # Self-attention vs. cross-attention will impact
-        # which KV cache memory-mapping & which
-        # seqlen datastructures we utilize
 
         if (attn_type != AttentionType.ENCODER and kv_cache.numel() > 0):
             # KV-cache during decoder-self- or
@@ -627,6 +639,12 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     cache_fuse_metadata=cache_fuse_metadata)
                 assert out.shape == output[:num_prefill_query_tokens].shape
                 output[:num_prefill_query_tokens] = out
+                
+                pass
+                # import torch
+                # attention = torch.nn.functional.scaled_dot_product_attention(query,key,value,attn_bias=cache_fuse_metadata["attn_bias"])
+                
+                
             else:
                 assert attn_type != AttentionType.ENCODER_ONLY, (
                     "Encoder-only models should not have prefix attention.")
@@ -800,14 +818,22 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             if status in [1,2]:
                 #import pdb
                 #pdb.set_trace()
-                out = xops.memory_efficient_attention_forward(
-                        query,
-                        key,
-                        value,
-                        attn_bias=cache_fuse_metadata["attn_bias"],
-                        p=0.0,
-                        scale=self.scale,
-                    )
+                # out = xops.memory_efficient_attention_forward(
+                #         query,
+                #         key,
+                #         value,
+                #         attn_bias=cache_fuse_metadata["attn_bias"],
+                #         p=0.0,
+                #         scale=self.scale,
+                #     )
+                
+                query = query.reshape(query.shape[0],query.shape[1],-1,query.shape[-1]).transpose(1,2)
+                key = key.reshape(key.shape[0],key.shape[1],-1,key.shape[-1]).transpose(1,2)
+                value = value.reshape(value.shape[0],value.shape[1],-1,value.shape[-1]).transpose(1,2)
+                
+                output = torch.nn.functional.scaled_dot_product_attention(query,key,value,attn_mask=cache_fuse_metadata["attn_bias"])
+                out = output.transpose(1,2)
+                pass
             else:
                 out = xops.memory_efficient_attention_forward(
                     query,

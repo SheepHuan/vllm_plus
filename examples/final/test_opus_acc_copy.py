@@ -24,15 +24,15 @@ from functools import partial
 from typing import List
 
 # download the font files and save in this fold
-font_path = "/root/code/vllm_plus/examples/dataset/data/fonts"
+# font_path = "/root/code/vllm_plus/examples/dataset/data/fonts"
  
-font_files = font_manager.findSystemFonts(fontpaths=font_path)
+# font_files = font_manager.findSystemFonts(fontpaths=font_path)
  
-for file in font_files:
-    font_manager.fontManager.addfont(file)
+# for file in font_files:
+#     font_manager.fontManager.addfont(file)
 
 # 设置字体
-matplotlib.rcParams['font.family'] = 'Arial'  # 设置字体为黑体
+matplotlib.rcParams['font.family'] = 'WenQuanYi Micro Hei'  # 设置字体为黑体
 matplotlib.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
 
 qwen_template="""<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant. <|im_end|>\n
@@ -1101,203 +1101,152 @@ def plot_kv_error_by_window_size(input_path: str, save_path: str = "examples/pip
     
     print(f"\n图表已保存至: {save_path}")
 
-def generate_reuse_output(text_a: str, text_b: str, text_c: str, template: str, model_name: str = "Qwen/Qwen2.5-7B-Instruct", max_model_len=8192, max_generate_len=512, window_size=7):
-    """Compare generation results when reusing KV Cache from text B and C for text A
+def generate_reuse_output(target: str, candidates: List[str], template: str, model_name: str = "Qwen/Qwen2.5-7B-Instruct", max_model_len=8192, max_generate_len=512, window_size=7):
+    """生成重用输出
     
     Args:
-        text_a: Target text
-        text_b: First source text
-        text_c: Second source text
-        model_name: Model name
-        max_model_len: Maximum model length
-        max_generate_len: Maximum generation length
-        
+        target: 目标文本
+        candidates: 候选文本列表
+        template: 模板
+        model_name: 模型名称
+        max_model_len: 最大模型长度
+        max_generate_len: 最大生成长度
+        window_size: 窗口大小
+    
     Returns:
-        dict: Contains generation results and attention values
+        results: 包含生成结果和注意力分数的字典
     """
     device = "cuda:0"
     pipeline = KVShareNewPipeline(model_name, device, max_model_len)
     tokenizer = pipeline.model.get_tokenizer()
     
     # Prepare prompts
-    prompt_a = template.format(text=text_a)
-    prompt_b = template.format(text=text_b)
-    prompt_c = template.format(text=text_c)
+    prompt_a = template.format(text=target)
+    
+    candidate_prompts = [template.format(text=candidate) for candidate in candidates]
     
     # Check token length
     tokens_a = tokenizer.encode(prompt_a)
-    tokens_b = tokenizer.encode(prompt_b)
-    tokens_c = tokenizer.encode(prompt_c)
+    candidate_token_ids = [tokenizer.encode(prompt) for prompt in candidate_prompts]
     
-    if len(tokens_a) > max_model_len or len(tokens_b) > max_model_len or len(tokens_c) > max_model_len:
-        raise ValueError("Text length exceeds maximum model length limit")
+    # if len(tokens_a) > max_model_len or any(len(token_ids) > max_model_len for token_ids in candidate_token_ids):
+    #     raise ValueError("Text length exceeds maximum model length limit")
     
     results = {
-        'full_compute': None,
-        'reuse_b': None,
-        'reuse_c': None,
+        "input_token_ids": tokens_a,
+        'full_compute_outputs': None,
+        'partial_compute_outputs': None,
+        "partial_compute_updated_indice": None,
         'source_outputs': {
-            'b': None,
-            'c': None
+           
         },
-        'attention_values': {
+        'forward_attention': {
             'full_compute': None,
-            'reuse_b': None,
-            'reuse_c': None
+            'partial_compute': None,
+        },
+        'cross_attention': {
+            'full_compute': None,
+            'partial_compute': None,
+        },
+        'attention': {
+            'full_compute': None,
+            'partial_compute': None,
         },
         'kv_errors': {
-            'reuse_b': {
+            'partial_compute': {
                 'key_errors': [],  # 按层统计的Key误差
                 'value_errors': [],  # 按层统计的Value误差
                 'token_key_errors': [],  # 按token位置统计的Key误差
                 'token_value_errors': []  # 按token位置统计的Value误差
-            },
-            'reuse_c': {
-                'key_errors': [],
-                'value_errors': [],
-                'token_key_errors': [],
-                'token_value_errors': []
             }
         }
     }
     
     # Get full computation KV cache as baseline
-    full_kv_cache, full_outputs, _, full_attn = KVShareNewPipeline.get_kvcache_by_full_compute(
+    full_kv_cache, full_outputs, _, full_forward_attn, full_cross_attn, full_attn = KVShareNewPipeline.get_kvcache_by_full_compute(
         pipeline.model,
         SamplingParams(temperature=0, max_tokens=max_generate_len),
         [prompt_a]
     )
-    results['attention_values']['full_compute'] = full_attn[0]
-    results['full_compute'] = full_outputs[0].outputs[0].text
+    results['forward_attention']['full_compute'] = full_forward_attn[0]
+    results['cross_attention']['full_compute'] = full_cross_attn[0]
+    results['attention']['full_compute'] = full_attn[0]
+    results['full_compute_outputs'] = full_outputs[0].outputs[0].text
     
-    # Get KV cache for B and C
-    source_kv_cache_b, source_outputs_b, _, source_attn_b = KVShareNewPipeline.get_kvcache_by_full_compute(
-        pipeline.model,
-        SamplingParams(temperature=0, max_tokens=max_generate_len),
-        [prompt_b]
-    )
-    results['source_outputs']['b'] = source_outputs_b[0].outputs[0].text
-    
-    source_kv_cache_c, source_outputs_c, _, source_attn_c = KVShareNewPipeline.get_kvcache_by_full_compute(
-        pipeline.model,
-        SamplingParams(temperature=0, max_tokens=max_generate_len),
-        [prompt_c]
-    )
-    results['source_outputs']['c'] = source_outputs_c[0].outputs[0].text
-    
-    source_token_ids_b = [output.prompt_token_ids for output in source_outputs_b]
-    source_token_ids_c = [output.prompt_token_ids for output in source_outputs_c]
-    
-    # Reuse KV Cache from B
-    target_kv_cache_b, reused_indices_b, unreused_indices_b, selected_tokens_b, target_slices_b = KVEditor.batch_kvedit(
+    # candidates_token_ids = [tokenizer.encode(candidate) for candidate in candidates]
+    candidates_kv_cache = []
+    max_request_id = 0
+    for idx,candidate_prompt in enumerate(candidate_prompts):
+        # Get KV cache for B and C
+        candidate_kv_cache, candidate_outputs, _, candidate_forward_attn, candidate_cross_attn, candidate_attn = KVShareNewPipeline.get_kvcache_by_full_compute(
+            pipeline.model,
+            SamplingParams(temperature=0, max_tokens=max_generate_len),
+            [candidate_prompt]
+        )
+        max_request_id = int(candidate_outputs[-1].request_id)
+        candidates_kv_cache.append(candidate_kv_cache)
+
+    # target_kvcache,batch_reused_map_indices,batch_unreused_map_indices,batch_sample_selected_token_indices,batch_target_slice_list = KVEditor.kvedit_v2(
+    #     tokens_a,
+    #     candidate_token_ids,
+    #     candidates_kv_cache,
+    #     window_size=window_size
+    # )
+    target_kvcache,batch_reused_map_indices,batch_unreused_map_indices,batch_sample_selected_token_indices,batch_target_slice_list = KVEditor.batch_kvedit(
         [tokens_a],
-        source_token_ids_b,
-        source_kv_cache_b,
+        candidate_token_ids,
+        candidates_kv_cache[0],
         window_size=window_size
     )
     
-    # Reuse KV Cache from C
-    target_kv_cache_c, reused_indices_c, unreused_indices_c, selected_tokens_c, target_slices_c = KVEditor.batch_kvedit(
-        [tokens_a],
-        source_token_ids_c,
-        source_kv_cache_c,
-        window_size=window_size
-    )
     
-    max_request_id = int(source_outputs_c[0].request_id)
     
-    # Generate using B's KV Cache
-    outputs_b, partial_kv_cache_b, batch_attn_b = KVShareNewPipeline.partial_compute(
+    for i in range(len(batch_reused_map_indices[0])):
+        print("resue token: ",tokenizer.decode(tokens_a[batch_reused_map_indices[0][i]]))
+    
+    partial_outputs, partial_kv_cache, batch_forward_attn, batch_cross_attn ,batch_attn,partial_compute_updated_indice = KVShareNewPipeline.partial_compute(
         pipeline.model,
         SamplingParams(temperature=0, max_tokens=max_generate_len),
         [prompt_a],
-        target_kv_cache_b,
-        reused_indices_b,
-        unreused_indices_b,
-        selected_tokens_b,
-        target_slices_b,
+        target_kvcache,
+        batch_reused_map_indices,
+        batch_unreused_map_indices,
+        batch_sample_selected_token_indices,
+        batch_target_slice_list,
         [max_request_id+1]
     )
-    results['attention_values']['reuse_b'] = batch_attn_b[0]
-    
-    # 计算B的KV误差
+    results['forward_attention']['partial_compute'] = batch_forward_attn[0]
+    results['cross_attention']['partial_compute'] = batch_cross_attn[0]
+    results['attention']['partial_compute'] = batch_attn[0]
+    results['partial_compute_outputs'] = partial_outputs[0].outputs[0].text
+
+    for i in range(len(batch_unreused_map_indices[0])):
+        print("unreused token: ",tokenizer.decode(tokens_a[batch_unreused_map_indices[0][i]]))
+    for i in range(len(partial_compute_updated_indice)):
+        print("updated token: ",tokenizer.decode(tokens_a[partial_compute_updated_indice[i]]))
+
     # 按层统计误差
     num_layers = full_kv_cache.shape[0]
     for layer_idx in range(num_layers):
         # Key误差
-        key_error = torch.abs(full_kv_cache[layer_idx, 0] - partial_kv_cache_b[layer_idx, 0])
-        results['kv_errors']['reuse_b']['key_errors'].append(torch.mean(key_error).item())
+        key_error = torch.abs(full_kv_cache[layer_idx, 0] - partial_kv_cache[layer_idx, 0])
+        results['kv_errors']['partial_compute']['key_errors'].append(torch.mean(key_error).item())
         
         # Value误差
-        value_error = torch.abs(full_kv_cache[layer_idx, 1] - partial_kv_cache_b[layer_idx, 1])
-        results['kv_errors']['reuse_b']['value_errors'].append(torch.mean(value_error).item())
+        value_error = torch.abs(full_kv_cache[layer_idx, 1] - partial_kv_cache[layer_idx, 1])
+        results['kv_errors']['partial_compute']['value_errors'].append(torch.mean(value_error).item())
     
     # 按token位置统计误差
     for token_idx in range(len(tokens_a)):
         # Key误差
-        key_error = torch.abs(full_kv_cache[:, 0, token_idx] - partial_kv_cache_b[:, 0, token_idx])
-        results['kv_errors']['reuse_b']['token_key_errors'].append(torch.mean(key_error).item())
+        key_error = torch.abs(full_kv_cache[:, 0, token_idx] - partial_kv_cache[:, 0, token_idx])
+        results['kv_errors']['partial_compute']['token_key_errors'].append(torch.mean(key_error).item())
         
         # Value误差
-        value_error = torch.abs(full_kv_cache[:, 1, token_idx] - partial_kv_cache_b[:, 1, token_idx])
-        results['kv_errors']['reuse_b']['token_value_errors'].append(torch.mean(value_error).item())
+        value_error = torch.abs(full_kv_cache[:, 1, token_idx] - partial_kv_cache[:, 1, token_idx])
+        results['kv_errors']['partial_compute']['token_value_errors'].append(torch.mean(value_error).item())
     
-    max_request_id = int(outputs_b[0].request_id)
-    
-    # Generate using C's KV Cache
-    outputs_c, partial_kv_cache_c, batch_attn_c = KVShareNewPipeline.partial_compute(
-        pipeline.model,
-        SamplingParams(temperature=0, max_tokens=max_generate_len),
-        [prompt_a],
-        target_kv_cache_c,
-        reused_indices_c,
-        unreused_indices_c,
-        selected_tokens_c,
-        target_slices_c,
-        [max_request_id+1]
-    )
-    results['attention_values']['reuse_c'] = batch_attn_c[0]
-    
-    # 计算C的KV误差
-    # 按层统计误差
-    for layer_idx in range(num_layers):
-        # Key误差
-        key_error = torch.abs(full_kv_cache[layer_idx, 0] - partial_kv_cache_c[layer_idx, 0])
-        results['kv_errors']['reuse_c']['key_errors'].append(torch.mean(key_error).item())
-        
-        # Value误差
-        value_error = torch.abs(full_kv_cache[layer_idx, 1] - partial_kv_cache_c[layer_idx, 1])
-        results['kv_errors']['reuse_c']['value_errors'].append(torch.mean(value_error).item())
-    
-    # 按token位置统计误差
-    for token_idx in range(len(tokens_a)):
-        # Key误差
-        key_error = torch.abs(full_kv_cache[:, 0, token_idx] - partial_kv_cache_c[:, 0, token_idx])
-        results['kv_errors']['reuse_c']['token_key_errors'].append(torch.mean(key_error).item())
-        
-        # Value误差
-        value_error = torch.abs(full_kv_cache[:, 1, token_idx] - partial_kv_cache_c[:, 1, token_idx])
-        results['kv_errors']['reuse_c']['token_value_errors'].append(torch.mean(value_error).item())
-    
-    # Save results
-    results['reuse_b'] = {
-        'output': outputs_b[0].outputs[0].text,
-        'reused_tokens': len(reused_indices_b[0]),
-        'unreused_tokens': len(unreused_indices_b[0]),
-        'reused_indices': reused_indices_b[0],
-        'unreused_indices': unreused_indices_b[0]
-    }
-    
-    results['reuse_c'] = {
-        'output': outputs_c[0].outputs[0].text,
-        'reused_tokens': len(reused_indices_c[0]),
-        'unreused_tokens': len(unreused_indices_c[0]),
-        'reused_indices': reused_indices_c[0],
-        'unreused_indices': unreused_indices_c[0]
-    }
-    
-    # Save token IDs for visualization
-    results['token_ids'] = tokens_a
+    results['partial_compute_updated_indice'] = partial_compute_updated_indice.detach().cpu().tolist()
     
     return results
 
@@ -1309,27 +1258,16 @@ def print_reuse_results(results: dict):
     """
     print("\nFull Computation Result:")
     print("-" * 50)
-    print(results['full_compute'])
+    print(results['full_compute_outputs'])
+
     
-    # print("\nSource Text B Output:")
-    # print("-" * 50)
-    # print(results['source_outputs']['b'])
-    
-    # print("\nSource Text C Output:")
-    # print("-" * 50)
-    # print(results['source_outputs']['c'])
-    
-    print("\nReusing Text B Result:")
+    print("\nReusing Result:")
     print("-" * 50)
     # print(f"Reused tokens: {results['reuse_b']['reused_tokens']}")
     # print(f"Unreused tokens: {results['reuse_b']['unreused_tokens']}")
-    print(f"Generated output: {results['reuse_b']['output']}")
+    print(f"Generated output: {results['partial_compute_outputs']}")
     
-    print("\nReusing Text C Result:")
-    print("-" * 50)
-    # print(f"Reused tokens: {results['reuse_c']['reused_tokens']}")
-    # print(f"Unreused tokens: {results['reuse_c']['unreused_tokens']}")
-    print(f"Generated output: {results['reuse_c']['output']}")
+
 
 def plot_kv_error_comparison(results: dict, save_path: str = "examples/pipeline/images/kv_error_comparison.png"):
     """Visualize KV error comparison when reusing KV Cache from B and C
@@ -1445,101 +1383,300 @@ def plot_token_kv_errors(results: dict, tokenizer, save_path: str = "examples/pi
     for pos, word in enumerate(token_words):
         print(f"{pos}\t{word}\t{token_key_errors_b[pos]:.4f}\t{token_value_errors_b[pos]:.4f}\t{token_key_errors_c[pos]:.4f}\t{token_value_errors_c[pos]:.4f}")
 
-def plot_cross_attention(results: dict, tokenizer, save_path: str = "examples/pipeline/images/cross_attention.png"):
+def plot_forward_attention(results: dict, tokenizer, save_path: str = "examples/pipeline/images/forward_attention.png", topk: int = 4):
+    """可视化前向注意力分数
+    
+    Args:
+        results: generate_reuse_output的返回结果
+        tokenizer: 用于解码token的tokenizer
+        save_path: 保存图片的路径
+        topk: 显示的解码token数量
+    """
+    # 获取token对应的单词
+    token_words = [tokenizer.decode([token]) for token in results['token_ids']]
+    
+    # 获取B和C的输出token
+    a_output_tokens = tokenizer.encode(results['full_compute'])
+    a_output_words = [tokenizer.decode([token]) for token in a_output_tokens]
+    b_output_tokens = tokenizer.encode(results['reuse_b']['output'])
+    c_output_tokens = tokenizer.encode(results['reuse_c']['output'])
+    b_output_words = [tokenizer.decode([token]) for token in b_output_tokens]
+    c_output_words = [tokenizer.decode([token]) for token in c_output_tokens]
+    
+    # 获取注意力值
+    full_attn = results['forward_attention']['full_compute']
+    b_attn = results['forward_attention']['reuse_b']
+    c_attn = results['forward_attention']['reuse_c']
+    
+    # 确保张量在CPU上
+    if torch.is_tensor(full_attn):
+        full_attn = full_attn.cpu().numpy()
+    if torch.is_tensor(b_attn):
+        b_attn = b_attn.cpu().numpy()
+    if torch.is_tensor(c_attn):
+        c_attn = c_attn.cpu().numpy()
+        
+    s,e = 25,-5
+    full_attn = full_attn[:, :, s:e]
+    b_attn = b_attn[:, :, s:e]
+    c_attn = c_attn[:, :, s:e]
+    token_words = token_words[s:e]
+    # 获取注意力头数和token数量
+    num_heads, num_tokens, _ = full_attn.shape
+    
+    # 归一化函数
+    def normalize_attention(attn):
+        # 使用最大最小归一化
+        attn = torch.tensor(attn)
+        min_val = attn.min()
+        max_val = attn.max()
+        if max_val != min_val:
+            attn = (attn - min_val) / (max_val - min_val)
+        return attn.numpy()
+    
+    full_attn = normalize_attention(full_attn)
+    b_attn = normalize_attention(b_attn)
+    c_attn = normalize_attention(c_attn)
+    
+    topk_a = 30
+    topk_b = 38
+    topk_c = 30
+    # 为每个head生成热力图
+    for head_idx in range(num_heads):
+        # 创建3个子图
+        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(20, 12))
+        
+        # 选择当前head的注意力值
+        full_head_attn = full_attn[head_idx, :topk_a, :]  # [num_tokens, num_tokens]
+        b_head_attn = b_attn[head_idx, :topk_b, :]  # [num_tokens, num_tokens]
+        c_head_attn = c_attn[head_idx, :topk_c, :]  # [num_tokens, num_tokens]
+
+        a_output_words = a_output_words[:topk_a]
+        b_output_words = b_output_words[:topk_b]
+        c_output_words = c_output_words[:topk_c]
+        # 绘制full compute的注意力热力图
+        sns.heatmap(full_head_attn, 
+                   ax=ax1,
+                   cmap='viridis',
+                   xticklabels=token_words,
+                   yticklabels=a_output_words,
+                   cbar_kws={'label': 'Attention Weight'})
+        ax1.set_title(f'Full Compute Forward Attention (Head {head_idx})')
+        plt.setp(ax1.get_xticklabels(), rotation=45, ha='right')
+        plt.setp(ax1.get_yticklabels(), rotation=0, ha='right')
+        
+        # 绘制B的注意力热力图
+        sns.heatmap(b_head_attn, 
+                   ax=ax2,
+                   cmap='viridis',
+                   xticklabels=token_words,
+                   yticklabels=b_output_words,
+                   cbar_kws={'label': 'Attention Weight'})
+        ax2.set_title(f'B Forward Attention (Head {head_idx})')
+        # 设置unreused token标签为红色
+        for i, label in enumerate(ax2.get_xticklabels()):
+            if i in results['reuse_b']['unreused_indices']:
+                label.set_color('red')
+        plt.setp(ax2.get_xticklabels(), rotation=45, ha='right')
+        plt.setp(ax2.get_yticklabels(), rotation=0, ha='right')
+        
+        # 绘制C的注意力热力图
+        sns.heatmap(c_head_attn, 
+                   ax=ax3,
+                   cmap='viridis',
+                   xticklabels=token_words,
+                   yticklabels=c_output_words,
+                   cbar_kws={'label': 'Attention Weight'})
+        ax3.set_title(f'C Forward Attention (Head {head_idx})')
+        # 设置unreused token标签为红色
+        for i, label in enumerate(ax3.get_xticklabels()):
+            if i in results['reuse_c']['unreused_indices']:
+                label.set_color('red')
+        plt.setp(ax3.get_xticklabels(), rotation=45, ha='right')
+        plt.setp(ax3.get_yticklabels(), rotation=0, ha='right')
+        
+        # 调整布局
+        plt.tight_layout()
+        
+        # 为每个head保存单独的图片
+        head_save_path = save_path.replace('.png', f'_head_{head_idx}.png')
+        plt.savefig(head_save_path, dpi=300, bbox_inches="tight")
+        plt.close()
+        
+        print(f"Head {head_idx}的前向注意力热力图已保存至: {head_save_path}")
+    
+    # 创建所有head求和后的热力图
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(20, 12))
+    
+    # 计算所有head的注意力值之和
+    full_attn_sum = np.sum(full_attn, axis=0)  # [num_tokens, num_tokens]
+    b_attn_sum = np.sum(b_attn, axis=0)  # [num_tokens, num_tokens]
+    c_attn_sum = np.sum(c_attn, axis=0)  # [num_tokens, num_tokens]
+    
+    # 绘制full compute的注意力热力图
+    sns.heatmap(full_attn_sum[:topk_a, :], 
+               ax=ax1,
+               cmap='viridis',
+               xticklabels=token_words,
+               yticklabels=a_output_words[:topk],
+               cbar_kws={'label': 'Attention Weight'})
+    ax1.set_title('Full Compute Forward Attention (All Heads Sum)')
+    plt.setp(ax1.get_xticklabels(), rotation=45, ha='right')
+    plt.setp(ax1.get_yticklabels(), rotation=0, ha='right')
+    
+    # 绘制B的注意力热力图
+    sns.heatmap(b_attn_sum[:topk_b, :], 
+               ax=ax2,
+               cmap='viridis',
+               xticklabels=token_words,
+               yticklabels=b_output_words,
+               cbar_kws={'label': 'Attention Weight'})
+    ax2.set_title('B Forward Attention (All Heads Sum)')
+    # 设置unreused token标签为红色
+    for i, label in enumerate(ax2.get_xticklabels()):
+        if i in results['reuse_b']['unreused_indices']:
+            label.set_color('red')
+    plt.setp(ax2.get_xticklabels(), rotation=45, ha='right')
+    plt.setp(ax2.get_yticklabels(), rotation=0, ha='right')
+    
+    # 绘制C的注意力热力图
+    sns.heatmap(c_attn_sum[:topk_c, :], 
+               ax=ax3,
+               cmap='viridis',
+               xticklabels=token_words,
+               yticklabels=c_output_words,
+               cbar_kws={'label': 'Attention Weight'})
+    ax3.set_title('C Forward Attention (All Heads Sum)')
+    # 设置unreused token标签为红色
+    for i, label in enumerate(ax3.get_xticklabels()):
+        if i in results['reuse_c']['unreused_indices']:
+            label.set_color('red')
+    plt.setp(ax3.get_xticklabels(), rotation=45, ha='right')
+    plt.setp(ax3.get_yticklabels(), rotation=0, ha='right')
+    
+    # 调整布局
+    plt.tight_layout()
+    
+    # 保存所有head求和后的图片
+    sum_save_path = save_path.replace('.png', '_all_heads_sum.png')
+    plt.savefig(sum_save_path, dpi=300, bbox_inches="tight")
+    plt.close()
+    
+    print(f"所有head求和后的前向注意力热力图已保存至: {sum_save_path}")
+    
+    print(f"所有head的前向注意力热力图已保存完成")
+
+def plot_cross_attention(results: dict, tokenizer, save_path: str = "examples/pipeline/images/cross_attention.png", topk: int = 4):
     """可视化交叉注意力分数
     
     Args:
         results: generate_reuse_output的返回结果
         tokenizer: 用于解码token的tokenizer
         save_path: 保存图片的路径
+        topk: 显示的解码token数量
     """
     # 获取token对应的单词
     token_words = [tokenizer.decode([token]) for token in results['token_ids']]
     
-    # 获取unreused indices
-    unreused_indices_b = results['reuse_b']['unreused_indices']
-    unreused_indices_c = results['reuse_c']['unreused_indices']
-    token_words_b = [token_words[i] for i in unreused_indices_b]
-    token_words_c = [token_words[i] for i in unreused_indices_c]
+    # 获取B和C的输出token
+    a_output_tokens = tokenizer.encode(results['full_compute'])
+    a_output_words = [tokenizer.decode([token]) for token in a_output_tokens]
+    b_output_tokens = tokenizer.encode(results['reuse_b']['output'])
+    c_output_tokens = tokenizer.encode(results['reuse_c']['output'])
+    b_output_words = [tokenizer.decode([token]) for token in b_output_tokens]
+    c_output_words = [tokenizer.decode([token]) for token in c_output_tokens]
     
-    # 处理full attention
-    full_attn = results['attention_values']['full_compute']
+    # 获取注意力值
+    full_attn = results['cross_attention']['full_compute']
+    b_attn = results['cross_attention']['reuse_b']
+    c_attn = results['cross_attention']['reuse_c']
+    
+    # 确保张量在CPU上
     if torch.is_tensor(full_attn):
         full_attn = full_attn.cpu().numpy()
-    num_head, num_token, _ = full_attn.shape
-    
-    # 处理B attention
-    b_attn = results['attention_values']['reuse_b']
     if torch.is_tensor(b_attn):
         b_attn = b_attn.cpu().numpy()
-    
-    # 处理C attention
-    c_attn = results['attention_values']['reuse_c']
     if torch.is_tensor(c_attn):
         c_attn = c_attn.cpu().numpy()
+        
+    s,e = 25,-5
+    full_attn = full_attn[:, :, s:e]
+    b_attn = b_attn[:, :, s:e]
+    c_attn = c_attn[:, :, s:e]
+    token_words = token_words[s:e]
+    # 获取注意力头数和token数量
+    num_heads, num_tokens, _ = full_attn.shape
     
-    # 实现softmax
-    def softmax(x, axis=-1):
-        # 减去最大值以提高数值稳定性
-        x_max = np.max(x, axis=axis, keepdims=True)
-        x_exp = np.exp(x - x_max)
-        return x_exp / np.sum(x_exp, axis=axis, keepdims=True)
+    # 归一化函数
+    def normalize_attention(attn):
+        # 使用最大最小归一化
+        attn = torch.tensor(attn)
+        min_val = attn.min()
+        max_val = attn.max()
+        if max_val != min_val:
+            attn = (attn - min_val) / (max_val - min_val)
+        return attn.numpy()
     
-    # 应用softmax
-    full_attn = softmax(full_attn, axis=-1)
-    b_attn = softmax(b_attn, axis=-1)
-    c_attn = softmax(c_attn, axis=-1)
+    full_attn = normalize_attention(full_attn)
+    b_attn = normalize_attention(b_attn)
+    c_attn = normalize_attention(c_attn)
     
+    topk_a = 30
+    topk_b = 38
+    topk_c = 30
     # 为每个head生成热力图
-    for head_idx in range(num_head):
-        # 创建2x2的子图
-        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(20, 12))
+    for head_idx in range(num_heads):
+        # 创建3个子图
+        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(20, 12))
         
         # 选择当前head的注意力值
-        full_attn_b = full_attn[head_idx][unreused_indices_b, :]  # [num_unreused, num_token]
-        full_attn_c = full_attn[head_idx][unreused_indices_c, :]  # [num_unreused, num_token]
-        b_attn_current = b_attn[head_idx][:, :]  # [num_token, num_token]
-        c_attn_current = c_attn[head_idx][:, :]  # [num_token, num_token]
-        
-        # 绘制full compute的注意力热力图 (B)
-        sns.heatmap(full_attn_b, ax=ax1, cmap='viridis')
-        ax1.set_title(f'Full Compute Cross Attention (Head {head_idx}) - Unreused Tokens B')
-        ax1.set_xticks(range(len(token_words)))
-        ax1.set_xticklabels(token_words, rotation=90, ha='right')
-        ax1.set_yticks(range(len(token_words_b)))
-        ax1.set_yticklabels(token_words_b, rotation=0, ha='right')
-        ax1.set_xlabel('All Tokens')
-        ax1.set_ylabel('Unreused Tokens (B)')
-        
-        # 绘制full compute的注意力热力图 (C)
-        sns.heatmap(full_attn_c, ax=ax2, cmap='viridis')
-        ax2.set_title(f'Full Compute Cross Attention (Head {head_idx}) - Unreused Tokens C')
-        ax2.set_xticks(range(len(token_words)))
-        ax2.set_xticklabels(token_words, rotation=90, ha='right')
-        ax2.set_yticks(range(len(token_words_c)))
-        ax2.set_yticklabels(token_words_c, rotation=0, ha='right')
-        ax2.set_xlabel('All Tokens')
-        ax2.set_ylabel('Unreused Tokens (C)')
+        full_head_attn = full_attn[head_idx, :topk_a, :]  # [num_tokens, num_tokens]
+        b_head_attn = b_attn[head_idx, :topk_b, :]  # [num_tokens, num_tokens]
+        c_head_attn = c_attn[head_idx, :topk_c, :]  # [num_tokens, num_tokens]
+
+        a_output_words = a_output_words[:topk_a]
+        b_output_words = b_output_words[:topk_b]
+        c_output_words = c_output_words[:topk_c]
+        # 绘制full compute的注意力热力图
+        sns.heatmap(full_head_attn, 
+                   ax=ax1,
+                   cmap='viridis',
+                   xticklabels=token_words,
+                   yticklabels=a_output_words,
+                   cbar_kws={'label': 'Attention Weight'})
+        ax1.set_title(f'Full Compute Cross Attention (Head {head_idx})')
+        plt.setp(ax1.get_xticklabels(), rotation=45, ha='right')
+        plt.setp(ax1.get_yticklabels(), rotation=0, ha='right')
         
         # 绘制B的注意力热力图
-        sns.heatmap(b_attn_current, ax=ax3, cmap='viridis')
-        ax3.set_title(f'Reuse B Cross Attention (Head {head_idx}) - Unreused Tokens')
-        ax3.set_xticks(range(len(token_words)))
-        ax3.set_xticklabels(token_words, rotation=90, ha='right')
-        ax3.set_yticks(range(len(token_words_b)))
-        ax3.set_yticklabels(token_words_b, rotation=0, ha='right')
-        ax3.set_xlabel('All Tokens')
-        ax3.set_ylabel('Unreused Tokens (B)')
+        sns.heatmap(b_head_attn, 
+                   ax=ax2,
+                   cmap='viridis',
+                   xticklabels=token_words,
+                   yticklabels=b_output_words,
+                   cbar_kws={'label': 'Attention Weight'})
+        ax2.set_title(f'B Cross Attention (Head {head_idx})')
+        # 设置unreused token标签为红色
+        for i, label in enumerate(ax2.get_xticklabels()):
+            if i in results['reuse_b']['unreused_indices']:
+                label.set_color('red')
+        plt.setp(ax2.get_xticklabels(), rotation=45, ha='right')
+        plt.setp(ax2.get_yticklabels(), rotation=0, ha='right')
         
         # 绘制C的注意力热力图
-        sns.heatmap(c_attn_current, ax=ax4, cmap='viridis')
-        ax4.set_title(f'Reuse C Cross Attention (Head {head_idx}) - Unreused Tokens')
-        ax4.set_xticks(range(len(token_words)))
-        ax4.set_xticklabels(token_words, rotation=90, ha='right')
-        ax4.set_yticks(range(len(token_words_c)))
-        ax4.set_yticklabels(token_words_c, rotation=0, ha='right')
-        ax4.set_xlabel('All Tokens')
-        ax4.set_ylabel('Unreused Tokens (C)')
+        sns.heatmap(c_head_attn, 
+                   ax=ax3,
+                   cmap='viridis',
+                   xticklabels=token_words,
+                   yticklabels=c_output_words,
+                   cbar_kws={'label': 'Attention Weight'})
+        ax3.set_title(f'C Cross Attention (Head {head_idx})')
+        # 设置unreused token标签为红色
+        for i, label in enumerate(ax3.get_xticklabels()):
+            if i in results['reuse_c']['unreused_indices']:
+                label.set_color('red')
+        plt.setp(ax3.get_xticklabels(), rotation=45, ha='right')
+        plt.setp(ax3.get_yticklabels(), rotation=0, ha='right')
         
         # 调整布局
         plt.tight_layout()
@@ -1550,6 +1687,65 @@ def plot_cross_attention(results: dict, tokenizer, save_path: str = "examples/pi
         plt.close()
         
         print(f"Head {head_idx}的交叉注意力热力图已保存至: {head_save_path}")
+    
+    # 创建所有head求和后的热力图
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(20, 12))
+    
+    # 计算所有head的注意力值之和
+    full_attn_sum = np.sum(full_attn, axis=0)  # [num_tokens, num_tokens]
+    b_attn_sum = np.sum(b_attn, axis=0)  # [num_tokens, num_tokens]
+    c_attn_sum = np.sum(c_attn, axis=0)  # [num_tokens, num_tokens]
+    
+    # 绘制full compute的注意力热力图
+    sns.heatmap(full_attn_sum[:topk_a, :], 
+               ax=ax1,
+               cmap='viridis',
+               xticklabels=token_words,
+               yticklabels=a_output_words[:topk],
+               cbar_kws={'label': 'Attention Weight'})
+    ax1.set_title('Full Compute Cross Attention (All Heads Sum)')
+    plt.setp(ax1.get_xticklabels(), rotation=45, ha='right')
+    plt.setp(ax1.get_yticklabels(), rotation=0, ha='right')
+    
+    # 绘制B的注意力热力图
+    sns.heatmap(b_attn_sum[:topk_b, :], 
+               ax=ax2,
+               cmap='viridis',
+               xticklabels=token_words,
+               yticklabels=b_output_words,
+               cbar_kws={'label': 'Attention Weight'})
+    ax2.set_title('B Cross Attention (All Heads Sum)')
+    # 设置unreused token标签为红色
+    for i, label in enumerate(ax2.get_xticklabels()):
+        if i in results['reuse_b']['unreused_indices']:
+            label.set_color('red')
+    plt.setp(ax2.get_xticklabels(), rotation=45, ha='right')
+    plt.setp(ax2.get_yticklabels(), rotation=0, ha='right')
+    
+    # 绘制C的注意力热力图
+    sns.heatmap(c_attn_sum[:topk_c, :], 
+               ax=ax3,
+               cmap='viridis',
+               xticklabels=token_words,
+               yticklabels=c_output_words,
+               cbar_kws={'label': 'Attention Weight'})
+    ax3.set_title('C Cross Attention (All Heads Sum)')
+    # 设置unreused token标签为红色
+    for i, label in enumerate(ax3.get_xticklabels()):
+        if i in results['reuse_c']['unreused_indices']:
+            label.set_color('red')
+    plt.setp(ax3.get_xticklabels(), rotation=45, ha='right')
+    plt.setp(ax3.get_yticklabels(), rotation=0, ha='right')
+    
+    # 调整布局
+    plt.tight_layout()
+    
+    # 保存所有head求和后的图片
+    sum_save_path = save_path.replace('.png', '_all_heads_sum.png')
+    plt.savefig(sum_save_path, dpi=300, bbox_inches="tight")
+    plt.close()
+    
+    print(f"所有head求和后的交叉注意力热力图已保存至: {sum_save_path}")
     
     print(f"所有head的交叉注意力热力图已保存完成")
 
@@ -1563,30 +1759,40 @@ def save_results_to_cache(results: dict, cache_path: str = "examples/pipeline/ca
     # 确保目录存在
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
     
-    # 将numpy数组转换为列表
+    # 将numpy数组转换为列表，处理None值
+    def convert_to_list(value):
+        if value is None:
+            return None
+        if torch.is_tensor(value):
+            return value.cpu().numpy().tolist()
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        return value
+    
     cache_data = {
-        'full_compute': results['full_compute'],
-        'reuse_b': results['reuse_b'],
-        'reuse_c': results['reuse_c'],
+        'input_token_ids': results['input_token_ids'],
+        'full_compute_outputs': results['full_compute_outputs'],
+        'partial_compute_outputs': results['partial_compute_outputs'],
         'source_outputs': results['source_outputs'],
-        'token_ids': results['token_ids'],
-        'attention_values': {
-            'full_compute': results['attention_values']['full_compute'].tolist(),
-            'reuse_b': results['attention_values']['reuse_b'].tolist(),
-            'reuse_c': results['attention_values']['reuse_c'].tolist()
+        'partial_compute_updated_indice': results['partial_compute_updated_indice'],
+        'forward_attention': {
+            'full_compute': convert_to_list(results['forward_attention']['full_compute']),
+            'partial_compute': convert_to_list(results['forward_attention']['partial_compute'])
+        },
+        'cross_attention': {
+            'full_compute': convert_to_list(results['cross_attention']['full_compute']),
+            'partial_compute': convert_to_list(results['cross_attention']['partial_compute'])
+        },
+        'attention': {
+            'full_compute': convert_to_list(results['attention']['full_compute']),
+            'partial_compute': convert_to_list(results['attention']['partial_compute'])
         },
         'kv_errors': {
-            'reuse_b': {
-                'key_errors': results['kv_errors']['reuse_b']['key_errors'],
-                'value_errors': results['kv_errors']['reuse_b']['value_errors'],
-                'token_key_errors': results['kv_errors']['reuse_b']['token_key_errors'],
-                'token_value_errors': results['kv_errors']['reuse_b']['token_value_errors']
-            },
-            'reuse_c': {
-                'key_errors': results['kv_errors']['reuse_c']['key_errors'],
-                'value_errors': results['kv_errors']['reuse_c']['value_errors'],
-                'token_key_errors': results['kv_errors']['reuse_c']['token_key_errors'],
-                'token_value_errors': results['kv_errors']['reuse_c']['token_value_errors']
+            'partial_compute': {
+                'key_errors': convert_to_list(results['kv_errors']['partial_compute']['key_errors']),
+                'value_errors': convert_to_list(results['kv_errors']['partial_compute']['value_errors']),
+                'token_key_errors': convert_to_list(results['kv_errors']['partial_compute']['token_key_errors']),
+                'token_value_errors': convert_to_list(results['kv_errors']['partial_compute']['token_value_errors'])
             }
         }
     }
@@ -1615,28 +1821,29 @@ def load_results_from_cache(cache_path: str = "examples/pipeline/cache/results_c
     
     # 将列表转换回numpy数组
     results = {
-        'full_compute': cache_data['full_compute'],
-        'reuse_b': cache_data['reuse_b'],
-        'reuse_c': cache_data['reuse_c'],
+        'input_token_ids': cache_data['input_token_ids'],
+        'full_compute_outputs': cache_data['full_compute_outputs'],
+        'partial_compute_outputs': cache_data['partial_compute_outputs'],
         'source_outputs': cache_data['source_outputs'],
-        'token_ids': cache_data['token_ids'],
-        'attention_values': {
-            'full_compute': np.array(cache_data['attention_values']['full_compute']),
-            'reuse_b': np.array(cache_data['attention_values']['reuse_b']),
-            'reuse_c': np.array(cache_data['attention_values']['reuse_c'])
+        'partial_compute_updated_indice': cache_data['partial_compute_updated_indice'],
+        'forward_attention': {
+            'full_compute': np.array(cache_data['forward_attention']['full_compute']),
+            'partial_compute': np.array(cache_data['forward_attention']['partial_compute'])
+        },
+        'cross_attention': {
+            'full_compute': np.array(cache_data['cross_attention']['full_compute']),
+            'partial_compute': np.array(cache_data['cross_attention']['partial_compute'])
+        },
+        'attention': {
+            'full_compute': np.array(cache_data['attention']['full_compute']),
+            'partial_compute': np.array(cache_data['attention']['partial_compute'])
         },
         'kv_errors': {
-            'reuse_b': {
-                'key_errors': np.array(cache_data['kv_errors']['reuse_b']['key_errors']),
-                'value_errors': np.array(cache_data['kv_errors']['reuse_b']['value_errors']),
-                'token_key_errors': np.array(cache_data['kv_errors']['reuse_b']['token_key_errors']),
-                'token_value_errors': np.array(cache_data['kv_errors']['reuse_b']['token_value_errors'])
-            },
-            'reuse_c': {
-                'key_errors': np.array(cache_data['kv_errors']['reuse_c']['key_errors']),
-                'value_errors': np.array(cache_data['kv_errors']['reuse_c']['value_errors']),
-                'token_key_errors': np.array(cache_data['kv_errors']['reuse_c']['token_key_errors']),
-                'token_value_errors': np.array(cache_data['kv_errors']['reuse_c']['token_value_errors'])
+            'partial_compute': {
+                'key_errors': np.array(cache_data['kv_errors']['partial_compute']['key_errors']),
+                'value_errors': np.array(cache_data['kv_errors']['partial_compute']['value_errors']),
+                'token_key_errors': np.array(cache_data['kv_errors']['partial_compute']['token_key_errors']),
+                'token_value_errors': np.array(cache_data['kv_errors']['partial_compute']['token_value_errors'])
             }
         }
     }
@@ -1644,127 +1851,340 @@ def load_results_from_cache(cache_path: str = "examples/pipeline/cache/results_c
     print(f"Results已从 {cache_path} 加载")
     return results
 
-# def plot_attention_matrix(results: dict, 
-#                         tokenizer,
-#                         save_path: str = "examples/pipeline/images/attention_matrix.png"):
-#     """可视化预填充阶段token之间的注意力分数
+def plot_attention_combined(results: dict, tokenizer, save_path: str = "examples/pipeline/images/attention_combined.png", topk: int = 100):
+    """可视化交叉注意力分数和相似度分析
     
-#     Args:
-#         results: generate_reuse_output的返回结果
-#         tokenizer: 用于解码token的tokenizer
-#         save_path: 保存图片的路径
-#     """
-#     # 获取token对应的单词
-#     token_words = [tokenizer.decode([token]) for token in results['token_ids']]
+    Args:
+        results: generate_reuse_output的返回结果
+        tokenizer: 用于解码token的tokenizer
+        save_path: 保存图片的路径
+        topk: 显示的解码token数量
+    """
+    # 获取token对应的单词
+    token_words = [tokenizer.decode([token]) for token in results['input_token_ids']]
     
-#     # 获取未复用的位置
-#     unreused_indices_b = results['reuse_b']['unreused_indices']
-#     unreused_indices_c = results['reuse_c']['unreused_indices']
+    # 获取输出token
+    full_output_tokens = tokenizer.encode(results['full_compute_outputs'])
+    full_output_words = [tokenizer.decode([token]) for token in full_output_tokens]
+    partial_output_tokens = tokenizer.encode(results['partial_compute_outputs'])
+    partial_output_words = [tokenizer.decode([token]) for token in partial_output_tokens]
     
-#     # 创建2x2的子图
-#     fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
+    # 获取注意力值
+    full_cross_attn = results['cross_attention']['full_compute']
+    partial_cross_attn = results['cross_attention']['partial_compute']
+    full_forward_attn = results['forward_attention']['full_compute']
+    partial_forward_attn = results['forward_attention']['partial_compute']
     
-#     # 定义切片范围
-#     s, e = 24, -6
+    # 确保数组不为空
+    if len(full_cross_attn) == 0 or len(partial_cross_attn) == 0:
+        print("警告：注意力数组为空，无法生成热力图")
+        return
+        
+    # 对注意力值进行softmax归一化
+    def normalize_attention(attn):
+        # 使用softmax归一化
+        attn = torch.softmax(torch.tensor(attn), dim=-1)
+        return attn.numpy()
     
-#     # 获取所有注意力矩阵
-#     full_attn = results['attention_values']['full_compute'][:, :]
-#     b_attn = results['attention_values']['reuse_b'][:, :]
-#     c_attn = results['attention_values']['reuse_c'][:, :]
+    full_cross_attn = normalize_attention(full_cross_attn)
+    partial_cross_attn = normalize_attention(partial_cross_attn)
+    full_forward_attn = normalize_attention(full_forward_attn)
+    partial_forward_attn = normalize_attention(partial_forward_attn)
+        
+    # 获取注意力头数量
+    num_heads = full_cross_attn.shape[0]
+    s,e = 25,-5
+    partial_compute_updated_indice = results['partial_compute_updated_indice']
     
-#     # 确保张量在CPU上
-#     if torch.is_tensor(full_attn):
-#         full_attn = full_attn.cpu().numpy()
-#     if torch.is_tensor(b_attn):
-#         b_attn = b_attn.cpu().numpy()
-#     if torch.is_tensor(c_attn):
-#         c_attn = c_attn.cpu().numpy()
+    # # 分析注意力相似度
+    similarity_results = analyze_attention_similarity(
+        torch.tensor(full_cross_attn[:, partial_compute_updated_indice, s:e]), 
+        torch.tensor( partial_cross_attn[:, :, s:e])
+    )
+    s = -5
+    # e = -1
+    # 为每个head创建热力图
+    for head_idx in range(num_heads):
+        # 获取当前head的注意力值
+        # full_head_cross = full_cross_attn[head_idx, partial_compute_updated_indice, s:e]
+        # partial_head_cross = partial_cross_attn[head_idx, :, s:e]
+        full_head_forward = full_forward_attn[head_idx, :, :]
+        partial_head_forward = partial_forward_attn[head_idx, s:, :]
+        
+        # # 创建full compute交叉注意力子图
+        # fig, ax = plt.subplots(figsize=(8, 4))
+        # sns.heatmap(full_head_cross, 
+        #            ax=ax,
+        #            cmap='viridis',
+        #            xticklabels=token_words[s:e],
+        #            yticklabels=[token_words[i] for i in range(len(token_words)) if i in partial_compute_updated_indice],
+        #            cbar_kws={'label': 'Attention Weight'})
+        # ax.set_title('Full Compute Cross Attention')
+        # plt.setp(ax.get_xticklabels(), rotation=60, ha='right')
+        # plt.setp(ax.get_yticklabels(), rotation=0, ha='right')
+        # plt.tight_layout()
+        
+        # # 保存full compute交叉注意力图片
+        # full_cross_save_path = save_path.replace('.png', f'_full_cross_head_{head_idx}.png')
+        # plt.savefig(full_cross_save_path, dpi=300, bbox_inches="tight")
+        # plt.close()
+        
+        # # 创建partial compute交叉注意力子图
+        # fig, ax = plt.subplots(figsize=(8, 4))
+        # sns.heatmap(partial_head_cross, 
+        #            ax=ax,   
+        #            cmap='viridis',
+        #            xticklabels=token_words[s:e],
+        #            yticklabels=[token_words[i] for i in range(len(token_words)) if i in partial_compute_updated_indice],
+        #            cbar_kws={'label': 'Attention Weight'})
+        # ax.set_title('Partial Compute Cross Attention')
+        # plt.setp(ax.get_xticklabels(), rotation=60, ha='right')
+        # plt.setp(ax.get_yticklabels(), rotation=0, ha='right')
+        # plt.tight_layout()
+        
+        # # 保存partial compute交叉注意力图片
+        # partial_cross_save_path = save_path.replace('.png', f'_partial_cross_head_{head_idx}.png')
+        # plt.savefig(partial_cross_save_path, dpi=300, bbox_inches="tight")
+        # plt.close()
+        
+        # 创建full compute前向注意力子图
+        fig, ax = plt.subplots(figsize=(12, 1))
+        sns.heatmap(full_head_forward, 
+                   ax=ax,
+                   cmap='viridis',
+                   cbar=False,
+                   xticklabels=False,
+                   yticklabels=False)
+        plt.tight_layout()
+        
+        # 保存full compute前向注意力图片
+        full_forward_save_path = save_path.replace('.png', f'_full_forward_head_{head_idx}.png')
+        plt.savefig(full_forward_save_path, dpi=300, bbox_inches="tight")
+        plt.close()
+        
+        # 创建partial compute前向注意力子图
+        fig, ax = plt.subplots(figsize=(12, 1))
+        sns.heatmap(partial_head_forward, 
+                   ax=ax,
+                   cmap='viridis',
+                   cbar=False,
+                   xticklabels=False,
+                   yticklabels=False)
+        plt.tight_layout()
+        
+        # 保存partial compute前向注意力图片
+        partial_forward_save_path = save_path.replace('.png', f'_partial_forward_head_{head_idx}.png')
+        plt.savefig(partial_forward_save_path, dpi=300, bbox_inches="tight")
+        plt.close()
+        
+        # print(f"Head {head_idx}的注意力分析图已保存至: {full_cross_save_path}, {partial_cross_save_path}, {full_forward_save_path}, {partial_forward_save_path}")
     
-#     # 准备标签
-#     visible_tokens = token_words[s:e]
-#     visible_tokens_b = [token_words[i] for i in unreused_indices_b]
-#     visible_tokens_c = [token_words[i] for i in unreused_indices_c]
+    # 创建所有head求和后的热力图
+    # 计算所有head的注意力值之和
+    # full_cross_sum = np.sum(full_cross_attn, axis=0)
+    # partial_cross_sum = np.sum(partial_cross_attn, axis=0)
+    # full_forward_sum = np.sum(full_forward_attn, axis=0)
+    # partial_forward_sum = np.sum(partial_forward_attn, axis=0)
     
-#     # 计算full compute attention的最大最小值作为归一化范围
-#     full_attn_b = full_attn[[i for i in unreused_indices_b],:]
-#     full_attn_c = full_attn[[i for i in unreused_indices_c],:]
+    # # 创建full compute交叉注意力求和后的热力图
+    # fig, ax = plt.subplots(figsize=(8, 4))
+    # sns.heatmap(full_cross_sum[:topk, s:e], 
+    #            ax=ax,
+    #            cmap='viridis',
+    #            xticklabels=token_words[s:e],
+    #            yticklabels=full_output_words[:topk],
+    #            cbar_kws={'label': 'Attention Weight'})
+    # ax.set_title('Full Compute Cross Attention (Sum of All Heads)')
+    # plt.setp(ax.get_xticklabels(), rotation=60, ha='right')
+    # plt.setp(ax.get_yticklabels(), rotation=0, ha='right')
+    # plt.tight_layout()
     
-#     # 使用full compute attention的最大最小值
-#     global_min = min(full_attn.min(), full_attn.min())
-#     global_max = max(full_attn.max(), full_attn.max())
+    # # 保存full compute交叉注意力求和后的图片
+    # full_cross_sum_save_path = save_path.replace('.png', '_full_cross_all_heads_sum.png')
+    # plt.savefig(full_cross_sum_save_path, dpi=300, bbox_inches="tight")
+    # plt.close()
     
-#     # 左上：full attn在b indices的注意可视化
-#     normalized_attn = (full_attn_b - global_min) / (global_max - global_min)
-#     sns.heatmap(normalized_attn,
-#                cmap='viridis',
-#                vmin=0,
-#                vmax=1,
-#             #    xticklabels=visible_tokens,
-#                yticklabels=visible_tokens_b,
-#                cbar_kws={'label': 'Normalized Attention Weight'},
-#                ax=ax1)
-#     ax1.set_title(f'Full Compute Attention (B Unreused Tokens)\nRange: [{global_min:.4f}, {global_max:.4f}]')
-#     ax1.set_xlabel('Prefill Token')
-#     ax1.set_ylabel('Prefill Token (Unreused)')
-#     plt.setp(ax1.get_xticklabels(), rotation=45, ha='right')
-#     plt.setp(ax1.get_yticklabels(), rotation=0, ha='right')
+    # # 创建partial compute交叉注意力求和后的热力图
+    # fig, ax = plt.subplots(figsize=(8, 4))
+    # sns.heatmap(partial_cross_sum[:topk, s:e], 
+    #            ax=ax,
+    #            cmap='viridis',
+    #            xticklabels=token_words[s:e],
+    #            yticklabels=partial_output_words[:topk],
+    #            cbar_kws={'label': 'Attention Weight'})
+    # ax.set_title('Partial Compute Cross Attention (Sum of All Heads)')
+    # plt.setp(ax.get_xticklabels(), rotation=60, ha='right')
+    # plt.setp(ax.get_yticklabels(), rotation=0, ha='right')
+    # plt.tight_layout()
     
-#     # 右上：full attn的注意力可视化（与C的未复用token对齐）
-#     normalized_attn = (full_attn_c - global_min) / (global_max - global_min)
-#     sns.heatmap(normalized_attn,
-#                cmap='viridis',
-#                vmin=0,
-#                vmax=1,
-#             #    xticklabels=visible_tokens,
-#                yticklabels=visible_tokens_c,
-#                cbar_kws={'label': 'Normalized Attention Weight'},
-#                ax=ax2)
-#     ax2.set_title(f'Full Compute Attention (C Unreused Tokens)\nRange: [{global_min:.4f}, {global_max:.4f}]')
-#     ax2.set_xlabel('Prefill Token')
-#     ax2.set_ylabel('Prefill Token (Unreused)')
-#     plt.setp(ax2.get_xticklabels(), rotation=45, ha='right')
-#     plt.setp(ax2.get_yticklabels(), rotation=0, ha='right')
+    # # 保存partial compute交叉注意力求和后的图片
+    # partial_cross_sum_save_path = save_path.replace('.png', '_partial_cross_all_heads_sum.png')
+    # plt.savefig(partial_cross_sum_save_path, dpi=300, bbox_inches="tight")
+    # plt.close()
     
-#     # 左下：B的注意力矩阵
-#     normalized_attn = (b_attn - global_min) / (global_max - global_min)
-#     sns.heatmap(normalized_attn,
-#                cmap='viridis',
-#                vmin=0,
-#                vmax=1,
-#             #    xticklabels=visible_tokens_b,
-#                yticklabels=visible_tokens_b,
-#                cbar_kws={'label': 'Normalized Attention Weight'},
-#                ax=ax3)
-#     ax3.set_title(f'Reuse B Attention\nRange: [{global_min:.4f}, {global_max:.4f}]')
-#     ax3.set_xlabel('Prefill Token')
-#     ax3.set_ylabel('Prefill Token (Unreused)')
-#     plt.setp(ax3.get_xticklabels(), rotation=45, ha='right')
-#     plt.setp(ax3.get_yticklabels(), rotation=0, ha='right')
+    # # 创建full compute前向注意力求和后的热力图
+    # fig, ax = plt.subplots(figsize=(8, 4))
+    # sns.heatmap(full_forward_sum[:topk, :topk], 
+    #            ax=ax,
+    #            cmap='viridis',
+    #            xticklabels=token_words[:topk],
+    #            yticklabels=token_words[:topk],
+    #            cbar_kws={'label': 'Attention Weight'})
+    # ax.set_title('Full Compute Forward Attention (Sum of All Heads)')
+    # plt.setp(ax.get_xticklabels(), rotation=60, ha='right')
+    # plt.setp(ax.get_yticklabels(), rotation=0, ha='right')
+    # plt.tight_layout()
     
-#     # 右下：C的注意力矩阵
-#     normalized_attn = (c_attn - global_min) / (global_max - global_min)
-#     sns.heatmap(normalized_attn,
-#                cmap='viridis',
-#                vmin=0,
-#                vmax=1,
-#             #    xticklabels=visible_tokens_c,
-#                yticklabels=visible_tokens_c,
-#                cbar_kws={'label': 'Normalized Attention Weight'},
-#                ax=ax4)
-#     ax4.set_title(f'Reuse C Attention\nRange: [{global_min:.4f}, {global_max:.4f}]')
-#     ax4.set_xlabel('Prefill Token')
-#     ax4.set_ylabel('Prefill Token (Unreused)')
-#     plt.setp(ax4.get_xticklabels(), rotation=45, ha='right')
-#     plt.setp(ax4.get_yticklabels(), rotation=0, ha='right')
+    # # 保存full compute前向注意力求和后的图片
+    # full_forward_sum_save_path = save_path.replace('.png', '_full_forward_all_heads_sum.png')
+    # plt.savefig(full_forward_sum_save_path, dpi=300, bbox_inches="tight")
+    # plt.close()
     
-#     # 调整布局
-#     plt.tight_layout()
+    # # 创建partial compute前向注意力求和后的热力图
+    # fig, ax = plt.subplots(figsize=(8, 4))
+    # sns.heatmap(partial_forward_sum[:topk, :topk], 
+    #            ax=ax,
+    #            cmap='viridis',
+    #            xticklabels=token_words[:topk],
+    #            yticklabels=token_words[:topk],
+    #            cbar_kws={'label': 'Attention Weight'})
+    # ax.set_title('Partial Compute Forward Attention (Sum of All Heads)')
+    # plt.setp(ax.get_xticklabels(), rotation=60, ha='right')
+    # plt.setp(ax.get_yticklabels(), rotation=0, ha='right')
+    # plt.tight_layout()
     
-#     # 保存图片
-#     plt.savefig(save_path, dpi=300, bbox_inches="tight")
-#     plt.close()
+    # # 保存partial compute前向注意力求和后的图片
+    # partial_forward_sum_save_path = save_path.replace('.png', '_partial_forward_all_heads_sum.png')
+    # plt.savefig(partial_forward_sum_save_path, dpi=300, bbox_inches="tight")
+    # plt.close()
     
-#     print(f"\nAttention error heatmap已保存至: {save_path}")
+    # print(f"所有head求和后的注意力分析图已保存至: {full_cross_sum_save_path}, {partial_cross_sum_save_path}, {full_forward_sum_save_path}, {partial_forward_sum_save_path}")
+    
+    # print(similarity_results)
+    # for head_idx,pos_info in enumerate(similarity_results["head_similarities"]):
+    #     print(f"Head {head_idx} 的平均相似度: {pos_info}")
+    
+    # print(f"所有head的注意力分析图已保存完成")
+
+def analyze_attention_similarity(full_attn: torch.Tensor, partial_attn: torch.Tensor, threshold: float = 0.7) -> dict:
+    """分析两个注意力矩阵的相似度
+    
+    Args:
+        full_attn: 完整计算的注意力矩阵 [num_heads, num_tokens, num_tokens]
+        partial_attn: 部分计算的注意力矩阵 [num_heads, num_tokens, num_tokens]
+        threshold: 相似度阈值，低于该值认为显著下降
+        
+    Returns:
+        dict: 包含相似度分析结果的字典
+    """
+    # 确保输入是torch张量
+    if not isinstance(full_attn, torch.Tensor):
+        full_attn = torch.tensor(full_attn)
+    if not isinstance(partial_attn, torch.Tensor):
+        partial_attn = torch.tensor(partial_attn)
+        
+    # 获取注意力头数和token数量
+    num_heads, num_tokens, _ = full_attn.shape
+    
+    # 初始化结果字典
+    results = {
+        "head_similarities": [],  # 每个头的平均相似度
+        "low_similarity_heads": [],  # 相似度低的头索引
+        "low_similarity_positions": [],  # 每个头中相似度低的位置
+        "head_similarity_matrix": torch.zeros((num_heads, num_tokens, num_tokens))  # 每个位置的相似度矩阵
+    }
+    
+    # 对每个注意力头计算相似度
+    for head_idx in range(num_heads):
+        # 获取当前头的注意力矩阵
+        full_head = full_attn[head_idx].reshape(1, -1)
+        partial_head = partial_attn[head_idx].reshape(1, -1)
+        
+        # 矩阵转换从1维向量
+        similarity_matrix = torch.nn.functional.cosine_similarity(full_head, partial_head)
+        
+        # 保存相似度矩阵
+        # results["head_similarity_matrix"][head_idx] = similarity_matrix
+        
+        # 计算平均相似度
+        avg_similarity = similarity_matrix.item()
+        results["head_similarities"].append(avg_similarity)
+        
+        # 找出相似度低的位置
+        # low_sim_positions = torch.where(similarity_matrix < threshold)
+        # if len(low_sim_positions[0]) > 0:
+        #     results["low_similarity_positions"].append({
+        #         "head_idx": head_idx,
+        #         "positions": list(zip(low_sim_positions[0].tolist(), 
+        #                             low_sim_positions[1].tolist()))
+        #     })
+    
+    # 找出相似度低的头
+    avg_similarities = torch.tensor(results["head_similarities"])
+    low_sim_heads = torch.where(avg_similarities < threshold)[0].tolist()
+    results["low_similarity_heads"] = low_sim_heads
+    
+    return results
+
+def plot_attention_similarity(results: dict, tokenizer, save_path: str = "examples/pipeline/images/attention_similarity.png"):
+    """可视化注意力相似度分析结果
+    
+    Args:
+        results: analyze_attention_similarity的返回结果
+        tokenizer: 用于解码token的tokenizer
+        save_path: 保存图片的路径
+    """
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    
+    # 获取token对应的单词
+    token_words = [tokenizer.decode([token]) for token in results['token_ids']]
+    
+    # 创建图表
+    plt.figure(figsize=(15, 10))
+    
+    # 1. 绘制每个头的平均相似度柱状图
+    plt.subplot(2, 1, 1)
+    head_similarities = results["head_similarities"]
+    plt.bar(range(len(head_similarities)), head_similarities)
+    plt.axhline(y=0.7, color='r', linestyle='--', label='Threshold')
+    plt.title('Average Similarity per Attention Head')
+    plt.xlabel('Attention Head Index')
+    plt.ylabel('Cosine Similarity')
+    plt.legend()
+    
+    # 2. 绘制相似度最低的头的注意力相似度热力图
+    if results["low_similarity_heads"]:
+        head_idx = results["low_similarity_heads"][0]  # 选择第一个低相似度头
+        similarity_matrix = results["head_similarity_matrix"][head_idx]
+        
+        plt.subplot(2, 1, 2)
+        sns.heatmap(similarity_matrix, 
+                   cmap='viridis',
+                   xticklabels=token_words,
+                   yticklabels=token_words,
+                   cbar_kws={'label': 'Cosine Similarity'})
+        plt.title(f'Attention Similarity Matrix (Head {head_idx})')
+        plt.setp(plt.gca().get_xticklabels(), rotation=45, ha='right')
+        plt.setp(plt.gca().get_yticklabels(), rotation=0, ha='right')
+    
+    # 调整布局
+    plt.tight_layout()
+    
+    # 保存图片
+    plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    plt.close()
+    
+    print(f"注意力相似度分析图已保存至: {save_path}")
+    
+    # 打印低相似度位置信息
+    print("\n低相似度位置信息:")
+    for pos_info in results["low_similarity_positions"]:
+        head_idx = pos_info["head_idx"]
+        positions = pos_info["positions"]
+        print(f"\nHead {head_idx} 的低相似度位置:")
+        for i, j in positions[:10]:  # 只显示前10个位置
+            print(f"位置 ({i}, {j}): {token_words[i]} -> {token_words[j]}")
 
 # 使用示例
 if __name__ == "__main__":
@@ -1774,43 +2194,61 @@ if __name__ == "__main__":
     # text_a = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27. In the sequence of numbers, what is the median number?"
     # text_b = "1, 2, 4, 5, 7, 8, 10, 11, 13, 14, 16, 17, 19, 20, 22, 23, 25, 26. In the sequence of numbers, what is the median number?"
     # text_c = "In the sequence of numbers, what is the median number?"
-    # text_a = "apple, banana, orange, pear, pineapple, mango, strawberry, kiwi, grape, watermelon. How many fruits are there in the sequence?"
-    # text_b = "apple, watermelon.How many fruits are there in the sequence?"
-    # text_c = "apple, banana, orange, grape, watermelon. How many fruits are there in the sequence?"
+    # text_a = "How many fruits are there in the sequence? apple, banana, orange, pear, pineapple, mango, strawberry, kiwi, grape, watermelon."
+    # text_b = "How many fruits are there in the sequence? apple, banana, orange."
+    # text_c = "How many fruits are there in the sequence? apple, banana, orange, pear, mango, strawberry, kiwi, grape, watermelon."
 
+
+    # text_a = "How many fruits are there in the sequence? banana, orange, pear, pineapple, mango, strawberry, grape, apple."
+    # text_b = "How many fruits are there in the sequence? pear, pineapple, mango."
+    # text_c = "How many fruits are there in the sequence? pear, pear, pear, pear, pear, pear, grape, apple."
+    
+    
+    # text_a = "banana, orange, pear, pineapple, mango, strawberry, grape, apple. How many fruits are there in the sequence?"
+    # text_b = "mango, strawberry, grape, apple, banana, orange, pear, pineapple."
+    
+    text_a = "\n banana, orange, pear, pineapple, mango, strawberry, grape, apple. Which position is the apple in the fruits sequence?"
+    # text_b = "\n cherry, strawberry, grape, apple, cherry, orange, pear, pineapple."
+    # text_b = "\n cherry, orange, pear, cherry, cherry, strawberry, grape, apple."
+    text_b = "\n pineapple, mango, strawberry, grape, apple."
+    # text_b = "orange, orange, orange, orange, orange, strawberry, grape, apple. Which number is the apple among the fruits in the sequential sequence?"
+    # text_a = "banana, orange, pear, pineapple, mango, strawberry, grape, apple. What is the position of the apple in the sequence?"
+    # text_b = "\n mango, mango, mango, mango, mango, strawberry, grape, apple."
+    # text_c = "\n mango, orange, pear, pineapple, time, time, time, time."
+    # text_d = "\n time, time, time, time, time, time, time, time. Which number is the apple among the fruits in the sequential sequence?"
+    # text_c = "pineapple, orange, pear, pineapple, pear, pear, pear, pear."
+    
+    # text_c = "How many fruits are there in the sequence? apple, banana, orange, pear, mango, strawberry, kiwi, grape, watermelon."
     # text_a = "Please help me analyze the personality traits of the character Jon Snow in A Song of Ice and Fire."
     # text_b = "Lin Daiyu in Dream of the Red Chamber. Please help me analyze the personality traits of the character."
     # text_c = "Daenerys Targaryen in A Song of Ice and Fire. Please help me analyze the personality traits of the character."
     
-    # text_a = "Albert is wondering how much pizza he can eat in one day. He buys 2 large pizzas and 2 small pizzas. A large pizza has 16 slices and a small pizza has 8 slices. If he eats it all, how many pieces does he eat that day? "
-    # text_b = "He buys 5 large pizzas and 6 small pizzas. A large pizza has 9 slices and a small pizza has 6 slices. If he eats it all, how many pieces does he eat that day? "
-    # text_c = "He buys 3 large pizzas and 4 small pizzas. A large pizza has 9 slices and a small pizza has 6 slices."
-    
-    text_a = "Buses arrive at a stop every 8 minutes starting at 8:00 AM, forming a time sequence: 8:00, 8:08, 10:00 AM. How many buses arrive between 8:30 AM and 9:30 AM, and what is the median arrival time in this interval?"
-    text_b = "Buses arrive at a stop every 6 minutes starting at 8:00 AM, forming a time sequence: 8:00, 8:06, 10:00 AM. How many buses arrive between 8:40 AM and 9:20 AM, and what is the median arrival time in this interval?"
-    text_c = "Buses arrive at a stop every 4 minutes starting at 8:00 AM, forming a time sequence: 8:00, 8:04, 10:00 AM. How many buses arrive between 8:30 AM and 9:30 AM, and what is the median arrival time in this interval?"
-    
-    
+    # text_a = "序列中有几个国家，阿根廷、亚美尼亚、澳大利亚、奥地利、比利时、巴西、保加利亚、布基那法索、喀麦隆、加拿大、智利、哥斯达黎加、科特迪瓦、克罗地亚、捷克共和国、丹麦、爱沙尼亚。"
+    # text_b = "序列中有几个国家，阿根廷、亚美尼亚、澳大利亚、奥地利、比利时、布基那法索、喀麦隆、加拿大、智利、哥斯达黎加、科特迪瓦、克罗地亚、丹麦、爱沙尼亚。"
+    # text_c = "序列中有几个国家，克罗地亚、捷克共和国、丹麦、爱沙尼亚。"
     template = "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant. <|im_end|>\n<|im_start|>user\n{text}\n<|im_end|>\n<|im_start|>assistant\n"
     model_name = "Qwen/Qwen2.5-7B-Instruct-GPTQ-Int4"
 
     # 检查缓存文件是否存在
     cache_path = "examples/pipeline/cache/results_cache.json"
-    if os.path.exists(cache_path):
-        # 如果缓存存在,直接加载
-        results = load_results_from_cache(cache_path)
-    else:
-        # 如果缓存不存在,重新计算并保存
-        results = generate_reuse_output(text_a, text_b, text_c, template, model_name,window_size=5)
-        save_results_to_cache(results, cache_path)
+    # if os.path.exists(cache_path):
+    #     # 如果缓存存在,直接加载
+    #     results = load_results_from_cache(cache_path)
+    # else:
+    #     # 如果缓存不存在,重新计算并保存
+    results = generate_reuse_output(text_a, [text_b], template, model_name,window_size=4)
+    save_results_to_cache(results, cache_path)
     
     print_reuse_results(results)
     
-    # 可视化交叉注意力
+    # # 可视化交叉注意力
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    plot_cross_attention(results, tokenizer)
-    plot_token_kv_errors(results, tokenizer)
+    plot_attention_combined(results, tokenizer)
+    # plot_cross_attention(results, tokenizer)
+    # plot_forward_attention(results, tokenizer)
+    # plot_token_kv_errors(results, tokenizer)
     # plot_attention_matrix(results, tokenizer)
     # plot_attention_error(results, tokenizer, num_decode_tokens=4)
     # plot_kv_error_by_window_size("examples/dataset/data/opus/opus_dataset_en-zh_similar_docs_top50_250405_windows_output_qwen2.5-32b.json", "examples/pipeline/images/kv_error_by_window_size.png")
+    
     

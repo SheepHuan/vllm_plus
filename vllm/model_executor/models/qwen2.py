@@ -203,8 +203,11 @@ class Qwen2Attention(nn.Module):
                               attn_type=attn_type)
         # 逻辑需要修改
         self.hack_kv = []
-        self.hack_attn = []
-        self.hack_kv_for_attn = None
+        # self.hack_forward_attn = []
+        # self.hack_attn = None
+        # self.hack_cross_attn = None
+        
+        # self.hack_kv_forward_attn = []
 
     def forward(
         self,
@@ -230,17 +233,12 @@ class Qwen2Attention(nn.Module):
                 else:
                     key_old = old_kv[0]
                     value_old = old_kv[1]
-                    key_old[cache_fuse_metadata["imp_indices"],:] = k
-                    value_old[cache_fuse_metadata["imp_indices"],:] = v
                     self.hack_kv = [key_old,value_old]
             else:
                 # NOTE VLLM在批处理的时候可能会循环调用这个
                 
                 self.hack_kv = [k.clone(),v.clone()]
                 # self.hack_attn = [attn_metadata.clone()]
-        if status in [0,1]:
-            old_kv[0] = k.clone()
-            old_kv[1] = v.clone()
             
         if status in [1,2]:
             if cache_fuse_metadata["fake_q"] is None:
@@ -249,38 +247,57 @@ class Qwen2Attention(nn.Module):
                                         cache_fuse_metadata['fake_q'],
                                         old_kv[0])    
         
+        def repeat_kv(cache,num_repeat):
+            """
+            kv_cache: [2, num_blocks, block_size * num_kv_heads * head_size]
+            num_repeat: int
+            """
+            cache = cache.reshape(cache.shape[0],self.num_kv_heads,-1)
+            cache = cache[:,:,None,:]
+            cache = cache.repeat(1,1,num_repeat,1)
+            cache = cache.reshape(cache.shape[0],-1)
+            cache = cache.transpose(0,1)
+            return cache
+        if attn_metadata.prefill_metadata and cache_fuse_metadata["enable_compute_as"] and status==1:
+            # 计算Attention Score
+            head_dim = self.num_heads*self.head_dim
+            batch_atten_score = torch.matmul(q,repeat_kv(k,self.total_num_heads//self.num_kv_heads)) / torch.sqrt(torch.tensor(self.q_size,device=q.device,dtype=q.dtype))
+            atten_mask = cache_fuse_metadata["prefill_atten_bias"]
+            batch_atten_score = batch_atten_score + atten_mask
+            batch_atten_score = torch.softmax(batch_atten_score,dim=-1)
+            # 找每个请求前top 30%的下标和后30%的下标a
+            batch_top_indices = []
+            batch_bottom_indices = []
+            
+            for batch_idx in range(len(cache_fuse_metadata["batch_prompt_slice"])):
+                prompt_slice = cache_fuse_metadata["batch_prompt_slice"][batch_idx]
+                atten_score = batch_atten_score[prompt_slice[0]:prompt_slice[1],prompt_slice[1]-1]
+                top_indices = torch.topk(atten_score,k=int(0.3*atten_score.shape[0])).indices
+                bottom_indices = torch.topk(atten_score,k=int(0.3*atten_score.shape[0]),largest=False).indices
+                batch_top_indices.append(top_indices+prompt_slice[0])
+                batch_bottom_indices.append(bottom_indices+prompt_slice[0])
+            batch_top_indices = torch.cat(batch_top_indices)
+            batch_bottom_indices = torch.cat(batch_bottom_indices)
+            batch_top_indices = torch.unique(batch_top_indices)
+            batch_bottom_indices = torch.unique(batch_bottom_indices)
+            batch_top_indices,_ = torch.sort(batch_top_indices)
+            batch_bottom_indices,_ = torch.sort(batch_bottom_indices)
+            cache_fuse_metadata["has_token_indices"] = batch_top_indices
+            cache_fuse_metadata["last_token_indices"] = batch_bottom_indices
+        if attn_metadata.prefill_metadata and status in [1,2]:
+            # 添加误差
+            if cache_fuse_metadata["has_additional_value_error"]:
+                random_error = torch.rand(len(cache_fuse_metadata["additional_map_indices"]), device=old_kv[1].device, dtype=old_kv[1].dtype) * 20 - 10
+                old_kv[1][cache_fuse_metadata["additional_map_indices"],:] = old_kv[1][cache_fuse_metadata["additional_map_indices"],:] + random_error.unsqueeze(-1)
+            elif cache_fuse_metadata["las_additional_value_error"]:
+                random_error = torch.rand(len(cache_fuse_metadata["additional_map_indices"]), device=old_kv[1].device, dtype=old_kv[1].dtype) * 20 - 10
+                old_kv[1][cache_fuse_metadata["additional_map_indices"],:] = old_kv[1][cache_fuse_metadata["additional_map_indices"],:] + random_error.unsqueeze(-1)
 
         q, k = self.rotary_emb(positions, q, k)
-        
+        # v = v*1.1640
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata,status,
-                                cache_fuse_metadata,old_kv)
-        if cache_fuse_metadata["collect_forward_attn"] and attn_metadata.prefill_metadata:
-            num_queries_per_kv = self.num_heads // self.num_kv_heads 
-            # self.hack_attn = attn_output
-            if status in [2]:
-                old_kv[0][cache_fuse_metadata["imp_indices"],:] = k.clone()
-                old_k_for_attn = old_kv[0].clone()
-                old_k_for_attn = old_k_for_attn.view(-1,self.num_kv_heads,self.head_dim)
-                old_k_for_attn = old_k_for_attn[:, :,
-                  None, :].expand(old_k_for_attn.shape[0], self.num_kv_heads,
-                                  num_queries_per_kv, old_k_for_attn.shape[-1])
-                old_k_for_attn = old_k_for_attn.reshape(-1,self.num_heads,self.head_dim).permute(1,2,0)
-                num_queries = q.shape[0]
-                q_head = q.reshape(-1,self.num_heads,self.head_dim).permute(1,0,2)
-                attn_score = torch.bmm(q_head,old_k_for_attn/ (self.head_dim**0.5))
-                self.hack_attn = attn_score
-            else:
-                old_k_for_attn = k.clone()
-                old_k_for_attn = old_k_for_attn.view(-1,self.num_kv_heads,self.head_dim)
-                old_k_for_attn = old_k_for_attn[:, :,
-                  None, :].expand(old_k_for_attn.shape[0], self.num_kv_heads,
-                                  num_queries_per_kv, old_k_for_attn.shape[-1])
-                old_k_for_attn = old_k_for_attn.reshape(-1,self.num_heads,self.head_dim).permute(1,2,0)
-                num_queries = q.shape[0]
-                q_head = q.reshape(-1,self.num_heads,self.head_dim).permute(1,0,2)
-                attn_score = torch.bmm(q_head,old_k_for_attn/ (self.head_dim**0.5))
-                self.hack_attn = attn_score
-
+                                cache_fuse_metadata,[old_kv[0],old_kv[1]])
+           
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -433,12 +450,30 @@ class Qwen2Model(nn.Module):
             "check": False,
             "collect": False,
             "collect_forward_attn": False,
+            "collect_cross_attn": False,
             "recomp_ratio":0.4,
             "kv_cache_dtype": None,
             "attn_bias": None,
             "imp_indices": None,
             "org_seq_len": None,
-            "selected_token_indices": []
+            "selected_token_indices": [],
+            
+            "enable_kvshare":False,
+            "enable_cacheblend":False,
+            "enable_only_compute_unreused": False,
+            
+            "has_additional_value_error":False,
+            "las_additional_value_error":False,
+
+            "enable_compute_as": False,
+            # "compute_as_layer": 4,
+            
+            "prefill_atten_bias":None,
+            "decode_atten_bias":None,
+            "has_token_indices":None,
+            "last_token_indices":None,
+            "batch_prompt_slice":None,
+            "fake_q":None,
             }     
         self.old_kvs = [[None,None]] * len(self.layers)  
             
@@ -497,6 +532,7 @@ class Qwen2Model(nn.Module):
             else:
                 old_kv = [[None,None]]
             
+         
             layer = self.layers[i]
             hidden_states, residual = layer(
                 positions,
@@ -510,12 +546,7 @@ class Qwen2Model(nn.Module):
             )
             if temp_status==1:
                 positions = positions[self.cache_fuse_metadata["imp_indices"]]
-            # if self.cache_fuse_metadata["use_additional_indices"]:
-            #     if temp_status in [1,2]:
-            #         update_kv = self.layers[i].self_attn.hack_kv
-            #         self.old_kvs[i][0][self.cache_fuse_metadata["imp_indices"],:] = update_kv[0][self.cache_fuse_metadata["imp_indices"],:]
-            #         self.old_kvs[i][1][self.cache_fuse_metadata["imp_indices"],:] = update_kv[1][self.cache_fuse_metadata["imp_indices"],:] 
-            
+
             
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
