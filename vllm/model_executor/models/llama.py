@@ -231,7 +231,52 @@ class LlamaAttention(nn.Module):
                 _, old_kv[0] = self.rotary_emb(cache_fuse_metadata['org_pos'],
                                             cache_fuse_metadata['fake_q'],
                                             old_kv[0])
-        
+        def repeat_kv(cache,num_repeat):
+            """
+            kv_cache: [2, num_blocks, block_size * num_kv_heads * head_size]
+            num_repeat: int
+            """
+            cache = cache.reshape(cache.shape[0],self.num_kv_heads,-1)
+            cache = cache[:,:,None,:]
+            cache = cache.repeat(1,1,num_repeat,1)
+            cache = cache.reshape(cache.shape[0],-1)
+            cache = cache.transpose(0,1)
+            return cache
+        if attn_metadata.prefill_metadata and cache_fuse_metadata["enable_compute_as"] and status==1:
+            # 计算Attention Score
+            head_dim = self.num_heads*self.head_dim
+            batch_atten_score = torch.matmul(q,repeat_kv(k,self.total_num_heads//self.num_kv_heads)) / torch.sqrt(torch.tensor(self.q_size,device=q.device,dtype=q.dtype))
+            atten_mask = cache_fuse_metadata["prefill_atten_bias"]
+            batch_atten_score = batch_atten_score + atten_mask
+            batch_atten_score = torch.softmax(batch_atten_score,dim=-1)
+            # 找每个请求前top 30%的下标和后30%的下标a
+            batch_top_indices = []
+            batch_bottom_indices = []
+            
+            for batch_idx in range(len(cache_fuse_metadata["batch_prompt_slice"])):
+                prompt_slice = cache_fuse_metadata["batch_prompt_slice"][batch_idx]
+                atten_score = batch_atten_score[prompt_slice[0]:prompt_slice[1],prompt_slice[1]-1]
+                top_indices = torch.topk(atten_score,k=int(0.5*atten_score.shape[0])).indices
+                bottom_indices = torch.topk(atten_score,k=int(0.5*atten_score.shape[0]),largest=False).indices
+                batch_top_indices.append(top_indices+prompt_slice[0])
+                batch_bottom_indices.append(bottom_indices+prompt_slice[0])
+            batch_top_indices = torch.cat(batch_top_indices)
+            batch_bottom_indices = torch.cat(batch_bottom_indices)
+            batch_top_indices = torch.unique(batch_top_indices)
+            batch_bottom_indices = torch.unique(batch_bottom_indices)
+            batch_top_indices,_ = torch.sort(batch_top_indices)
+            batch_bottom_indices,_ = torch.sort(batch_bottom_indices)
+            cache_fuse_metadata["has_token_indices"] = batch_top_indices
+            cache_fuse_metadata["las_token_indices"] = batch_bottom_indices
+        if attn_metadata.prefill_metadata and status in [1,2]:
+            # 添加误差
+            if cache_fuse_metadata["has_additional_value_error"]:
+                random_error = torch.rand(len(cache_fuse_metadata["has_token_indices"]), device=old_kv[1].device, dtype=old_kv[1].dtype) * 4 - 2
+                old_kv[1][cache_fuse_metadata["has_token_indices"],:] = old_kv[1][cache_fuse_metadata["has_token_indices"],:] + random_error.unsqueeze(-1)
+            elif cache_fuse_metadata["las_additional_value_error"]:
+                random_error = torch.rand(len(cache_fuse_metadata["las_token_indices"]), device=old_kv[1].device, dtype=old_kv[1].dtype) * 4 - 2
+                old_kv[1][cache_fuse_metadata["las_token_indices"],:] = old_kv[1][cache_fuse_metadata["las_token_indices"],:] + random_error.unsqueeze(-1)
+
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata, status=status,
                                 cache_fuse_metadata=cache_fuse_metadata,
@@ -381,13 +426,31 @@ class LlamaModel(nn.Module):
             "check_layers":[1],
             "check": False,
             "collect": False,
+            "collect_forward_attn": False,
+            "collect_cross_attn": False,
             "recomp_ratio":0.4,
             "kv_cache_dtype": None,
             "attn_bias": None,
             "imp_indices": None,
             "org_seq_len": None,
-            "selected_token_indices": []
-            }     
+            "selected_token_indices": [],
+            
+            "enable_kvshare":False,
+            "enable_cacheblend":False,
+            "enable_only_compute_unreused": False,
+            
+            "has_additional_value_error":False,
+            "las_additional_value_error":False,
+
+            "enable_compute_as": False,
+
+            "prefill_atten_bias":None,
+            "decode_atten_bias":None,
+            "has_token_indices":None,
+            "last_token_indices":None,
+            "batch_prompt_slice":None,
+            "fake_q":None,
+            }       
         self.old_kvs = [[None,None]] * len(self.layers)  
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -456,12 +519,7 @@ class LlamaModel(nn.Module):
             
             if temp_status==1:
                 positions = positions[self.cache_fuse_metadata["imp_indices"]]
-            # if self.cache_fuse_metadata["use_additional_indices"]:
-            #     if temp_status in [1,2]:
-            #         update_kv = self.layers[i].self_attn.hack_kv
-            #         self.old_kvs[i][0][self.cache_fuse_metadata["imp_indices"],:] = update_kv[0][self.cache_fuse_metadata["imp_indices"],:]
-            #         self.old_kvs[i][1][self.cache_fuse_metadata["imp_indices"],:] = update_kv[1][self.cache_fuse_metadata["imp_indices"],:] 
-            
+        
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({

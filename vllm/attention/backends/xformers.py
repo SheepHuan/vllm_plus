@@ -519,27 +519,43 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     cache_fuse_metadata["imp_indices"] = top_indices
                     query = query[top_indices,:,:]
                     attn_bias = LowerTriangularFromBottomRightMask()
-                    cache_fuse_metadata["attn_bias"] = attn_bias
+                    cache_fuse_metadata["prefill_atten_bias"] = attn_bias
                     attn_metadata.prefill_metadata.attn_bias=None
                 elif cache_fuse_metadata["enable_kvshare"]:
-                    pass
+                    top_indices = torch.cat([cache_fuse_metadata["additional_map_indices"],cache_fuse_metadata["has_token_indices"]])
+                    cache_fuse_metadata["imp_indices"] = top_indices
+                    
+                    query = query[top_indices,:,:]
+                    batch_seq_start_loc = cache_fuse_metadata["batch_seq_start_loc"]
+                    # 构造合理的attn_bias
+                    attn_bias = torch.zeros(1,query.shape[0],old_kv[0].shape[0],device=query.device,dtype=query.dtype)
+                    for idx,index in enumerate(top_indices):
+                        for i in range(len(batch_seq_start_loc)-1):
+                            if index >= batch_seq_start_loc[i] and index < batch_seq_start_loc[i+1]:
+                                attn_bias[:,idx,batch_seq_start_loc[i]:index+1] = 1
+                    cache_fuse_metadata["prefill_atten_bias"] = attn_bias
+                    attn_metadata.prefill_metadata.attn_bias=None
+                    
                 elif cache_fuse_metadata["enable_only_compute_unreused"]:
                     top_indices = cache_fuse_metadata["additional_map_indices"]
+                    if cache_fuse_metadata["has_additional_value_error"]:
+                        top_indices = torch.cat([cache_fuse_metadata["additional_map_indices"],cache_fuse_metadata["las_token_indices"]])
+                    elif cache_fuse_metadata["las_additional_value_error"]:
+                        top_indices = torch.cat([cache_fuse_metadata["additional_map_indices"],cache_fuse_metadata["has_token_indices"]])
                     
                     cache_fuse_metadata["imp_indices"] = top_indices
                     query = query[top_indices,:,:]
-                    batch_prompt_slice = cache_fuse_metadata["batch_prompt_slice"]
+                    batch_seq_start_loc = cache_fuse_metadata["batch_seq_start_loc"]
                     
                    
                     attn_bias = torch.zeros(1,query.shape[0],old_kv[0].shape[0],device=query.device,dtype=query.dtype)
                     for idx,index in enumerate(top_indices):
-                        for i in range(len(batch_prompt_slice)):
-                            if index >= batch_prompt_slice[i][0] and index < batch_prompt_slice[i][1]:
-                                attn_bias[:,idx,batch_prompt_slice[i][0]:index+1] = 1
+                        for i in range(len(batch_seq_start_loc)-1):
+                            if index >= batch_seq_start_loc[i] and index < batch_seq_start_loc[i+1]:
+                                attn_bias[:,idx,batch_seq_start_loc[i]:index+1] = 1
                        
-                    # attn_bias = attn_bias[:,None,:,:]
-                    # attn_bias = attn_bias.repeat(1,self.num_heads,1,1)
-                    cache_fuse_metadata["attn_bias"] = attn_bias
+                    
+                    cache_fuse_metadata["prefill_atten_bias"] = attn_bias
                     attn_metadata.prefill_metadata.attn_bias=None
             else:
                 pass
@@ -609,8 +625,12 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         else:
             num_prefill_tokens = attn_metadata.num_prefill_tokens
             num_decode_tokens = attn_metadata.num_decode_tokens
-            assert key.shape[0] == num_prefill_tokens + num_decode_tokens
-            assert value.shape[0] == num_prefill_tokens + num_decode_tokens
+            if cache_fuse_metadata["enable_kvshare"]  and attn_metadata.decode_metadata:
+                # num_decode_tokens = 0
+                pass
+            else:
+                assert key.shape[0] == num_prefill_tokens + num_decode_tokens
+                assert value.shape[0] == num_prefill_tokens + num_decode_tokens
 
             output = torch.empty_like(query)
             # Query for decode. KV is not needed because it is already cached.
@@ -619,9 +639,12 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             query = query[:num_prefill_tokens]
             key = key[:num_prefill_tokens]
             value = value[:num_prefill_tokens]
-
-            assert query.shape[0] == num_prefill_tokens
-            assert decode_query.shape[0] == num_decode_tokens
+            if cache_fuse_metadata["enable_kvshare"] and attn_metadata.decode_metadata:
+                # num_decode_tokens = 0
+                pass
+            else:
+                assert query.shape[0] == num_prefill_tokens
+                assert decode_query.shape[0] == num_decode_tokens
         
         
 
@@ -700,6 +723,14 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 k_scale,
                 v_scale,
             )
+            
+            # query = decode_query.reshape(query.shape[0],query.shape[1],-1,query.shape[-1]).transpose(1,2)
+            # key = key.reshape(key.shape[0],key.shape[1],-1,key.shape[-1]).transpose(1,2)
+            # value = value.reshape(value.shape[0],value.shape[1],-1,value.shape[-1]).transpose(1,2)
+            
+            # output = torch.nn.functional.scaled_dot_product_attention(query,key,value,attn_mask=cache_fuse_metadata["prefill_atten_bias"])
+            # out = output.transpose(1,2)
+            
 
         # Reshape the output tensor.
         return output.view(-1, self.num_heads * self.head_size)
@@ -831,7 +862,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 key = key.reshape(key.shape[0],key.shape[1],-1,key.shape[-1]).transpose(1,2)
                 value = value.reshape(value.shape[0],value.shape[1],-1,value.shape[-1]).transpose(1,2)
                 
-                output = torch.nn.functional.scaled_dot_product_attention(query,key,value,attn_mask=cache_fuse_metadata["attn_bias"])
+                output = torch.nn.functional.scaled_dot_product_attention(query,key,value,attn_mask=cache_fuse_metadata["prefill_atten_bias"])
                 out = output.transpose(1,2)
                 pass
             else:

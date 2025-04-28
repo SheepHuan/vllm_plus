@@ -28,3 +28,14 @@ for item in all_paris:
     
 print(len(new_data))
 json.dump(new_data, open(output_path, "w", encoding="utf-8"), indent=4, ensure_ascii=False)
+
+
+output_path = "examples/dataset/data/opus/opus_test.json"
+
+test_data = []
+
+for item in new_data:
+    test_data.append(item["target_doc"])
+    
+json.dump(test_data, open(output_path, "w", encoding="utf-8"), indent=4, ensure_ascii=False)
+

@@ -95,44 +95,7 @@ class Qwen2MLP(nn.Module):
         x, _ = self.down_proj(x)
         return x
 
-# def do_blend(
-#         status: int,
-#         old_kv: List[torch.Tensor],
-#         cache_fuse_metadata: dict,
-#         query: torch.Tensor,
-#         key: torch.Tensor,
-#         value: torch.Tensor,
-#         attn_metadata: AttentionMetadata
-#     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, AttentionMetadata]:
-#         # if status in [1, 2]:
-#         #     # Huan: 预缓存的key和value的形状需要调整
-#         #     key_old = old_kv[0].view(-1, num_kv_heads, head_size)
-#         #     value_old = old_kv[1].view(-1, num_kv_heads, head_size)
-#         key_old = old_kv[0]
-#         value_old = old_kv[1]
-#         if status in [1]:
-#             # FIXME: 需要修改,防止出现additional_map_indices为空的情况
-#             if  cache_fuse_metadata["use_additional_indices"]:
-#                 top_indices = cache_fuse_metadata["additional_map_indices"]
-#                 cache_fuse_metadata["imp_indices"] = top_indices
-                
-#                 attn_metadata.query_start_loc = torch.cat([torch.tensor([0],device=cache_fuse_metadata['selected_token_indices'].device),cache_fuse_metadata['selected_token_indices']+1]).to(torch.int32)
-#                 attn_metadata.num_prefill_tokens = len(cache_fuse_metadata["additional_map_indices"])
-#                 # attn_metadata.max_query_len = max(cache_fuse_metadata["selected_token_indices"][1:]-cache_fuse_metadata["selected_token_indices"][:-1]).item()
-#                 # attn_metadata.prefill_metadata.num_prefill_tokens = len(cache_fuse_metadata["additional_map_indices"])
-#                 # attn_metadata.prefill_metadata.query_start_loc =  attn_metadata.query_start_loc.to(torch.int32)
 
-#         if status in [1]:
-#             imp_indices = cache_fuse_metadata["imp_indices"]
-#             query = query[imp_indices,:]
-            
-
-#         if status in [2]:
-#             imp_indices = cache_fuse_metadata["imp_indices"]
-#             key_old[imp_indices,:] = key 
-#             value_old[imp_indices,:] = value
-
-#         return query, key_old, value_old, attn_metadata
 
 class Qwen2Attention(nn.Module):
 
@@ -268,14 +231,22 @@ class Qwen2Attention(nn.Module):
             # 找每个请求前top 30%的下标和后30%的下标a
             batch_top_indices = []
             batch_bottom_indices = []
-            
-            for batch_idx in range(len(cache_fuse_metadata["batch_prompt_slice"])):
-                prompt_slice = cache_fuse_metadata["batch_prompt_slice"][batch_idx]
-                atten_score = batch_atten_score[prompt_slice[0]:prompt_slice[1],prompt_slice[1]-1]
-                top_indices = torch.topk(atten_score,k=int(0.3*atten_score.shape[0])).indices
-                bottom_indices = torch.topk(atten_score,k=int(0.3*atten_score.shape[0]),largest=False).indices
-                batch_top_indices.append(top_indices+prompt_slice[0])
-                batch_bottom_indices.append(bottom_indices+prompt_slice[0])
+            has_top_ratio = cache_fuse_metadata["has_top_ratio"]
+            las_top_ratio = cache_fuse_metadata["las_top_ratio"]
+            # 选择对应top_indices和bottom_indices中V值误差最高的30%
+            for batch_idx in range(len(cache_fuse_metadata["batch_seq_start_loc"])-1):
+                start_loc = cache_fuse_metadata["batch_seq_start_loc"][batch_idx]
+                end_loc = cache_fuse_metadata["batch_seq_start_loc"][batch_idx+1]
+                atten_score = batch_atten_score[start_loc:end_loc,end_loc-1]
+                top_indices = torch.topk(atten_score,k=int(has_top_ratio*atten_score.shape[0])).indices
+                bottom_indices = torch.topk(atten_score,k=int(las_top_ratio*atten_score.shape[0]),largest=False).indices
+                # 选择对应top_indices和bottom_indices中V值误差最高的30%
+                
+                pass
+                
+                
+                batch_top_indices.append(top_indices+start_loc)
+                batch_bottom_indices.append(bottom_indices+start_loc)
             batch_top_indices = torch.cat(batch_top_indices)
             batch_bottom_indices = torch.cat(batch_bottom_indices)
             batch_top_indices = torch.unique(batch_top_indices)
@@ -283,15 +254,30 @@ class Qwen2Attention(nn.Module):
             batch_top_indices,_ = torch.sort(batch_top_indices)
             batch_bottom_indices,_ = torch.sort(batch_bottom_indices)
             cache_fuse_metadata["has_token_indices"] = batch_top_indices
-            cache_fuse_metadata["last_token_indices"] = batch_bottom_indices
+            cache_fuse_metadata["las_token_indices"] = batch_bottom_indices
+        if attn_metadata.decode_metadata and cache_fuse_metadata["enable_compute_as"] and cache_fuse_metadata["enable_kvshare"]:
+            pass
         if attn_metadata.prefill_metadata and status in [1,2]:
             # 添加误差
             if cache_fuse_metadata["has_additional_value_error"]:
-                random_error = torch.rand(len(cache_fuse_metadata["additional_map_indices"]), device=old_kv[1].device, dtype=old_kv[1].dtype) * 20 - 10
-                old_kv[1][cache_fuse_metadata["additional_map_indices"],:] = old_kv[1][cache_fuse_metadata["additional_map_indices"],:] + random_error.unsqueeze(-1)
+                # 创建一个从1到10的递增序列，长度为64
+                base_error = torch.linspace(1, 10, 64, device=old_kv[0].device, dtype=old_kv[0].dtype)
+                # 将base_error重复到所需的长度
+                repeated_error = base_error.repeat(len(cache_fuse_metadata["has_token_indices"]) // 64 + 1)
+                # 截取到所需的长度
+                random_error = repeated_error[:len(cache_fuse_metadata["has_token_indices"])]
+                # 在最后一个维度上添加误差
+                old_kv[0][cache_fuse_metadata["has_token_indices"],:] = old_kv[0][cache_fuse_metadata["has_token_indices"],:] + random_error.unsqueeze(-1)
+                # old_kv[1][cache_fuse_metadata["has_token_indices"],:] = old_kv[1][cache_fuse_metadata["has_token_indices"],:] + random_error.unsqueeze(-1)
             elif cache_fuse_metadata["las_additional_value_error"]:
-                random_error = torch.rand(len(cache_fuse_metadata["additional_map_indices"]), device=old_kv[1].device, dtype=old_kv[1].dtype) * 20 - 10
-                old_kv[1][cache_fuse_metadata["additional_map_indices"],:] = old_kv[1][cache_fuse_metadata["additional_map_indices"],:] + random_error.unsqueeze(-1)
+                # 创建一个从1到10的递增序列，长度为64
+                base_error = torch.linspace(1, 10, 64, device=old_kv[0].device, dtype=old_kv[0].dtype)
+                # 将base_error重复到所需的长度
+                repeated_error = base_error.repeat(len(cache_fuse_metadata["las_token_indices"]) // 64 + 1)
+                # 截取到所需的长度
+                random_error = repeated_error[:len(cache_fuse_metadata["las_token_indices"])]
+                # 在最后一个维度上添加误差
+                old_kv[0][cache_fuse_metadata["has_token_indices"],:] = old_kv[0][cache_fuse_metadata["has_token_indices"],:] + random_error.unsqueeze(-1)
 
         q, k = self.rotary_emb(positions, q, k)
         # v = v*1.1640
@@ -466,13 +452,14 @@ class Qwen2Model(nn.Module):
             "las_additional_value_error":False,
 
             "enable_compute_as": False,
-            # "compute_as_layer": 4,
-            
+
             "prefill_atten_bias":None,
             "decode_atten_bias":None,
             "has_token_indices":None,
             "last_token_indices":None,
-            "batch_prompt_slice":None,
+            "batch_seq_start_loc":None,
+            "las_top_ratio":0.7,
+            "has_top_ratio":0.3,
             "fake_q":None,
             }     
         self.old_kvs = [[None,None]] * len(self.layers)  
