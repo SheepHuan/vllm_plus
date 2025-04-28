@@ -98,7 +98,7 @@ if __name__ == "__main__":
     os.environ["VLLM_USE_MODELSCOPE"] = "True"
     # os.environ["VLLM_ATTENTION_BACKEND"] = "XFORMERS"
     # model_name = "Qwen/Qwen2.5-32B-Instruct-GPTQ-Int4"
-    model_name = "Qwen/Qwen2.5-7B-Instruct"
+    model_name = "Qwen/Qwen2.5-1.5B-Instruct"
     # model_name = "LLM-Research/Meta-Llama-3.1-8B-Instruct"
     pipeline = KVShareNewPipeline(model_name,device="cuda:0")
     

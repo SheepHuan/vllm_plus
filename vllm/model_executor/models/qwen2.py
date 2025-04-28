@@ -26,7 +26,7 @@ from typing import Iterable, List, Optional, Set, Tuple, Union
 import torch
 from torch import nn
 from transformers import Qwen2Config
-
+import time
 from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -222,12 +222,15 @@ class Qwen2Attention(nn.Module):
             cache = cache.transpose(0,1)
             return cache
         if attn_metadata.prefill_metadata and cache_fuse_metadata["enable_compute_as"] and status==1:
+            start_time = time.time()
             # 计算Attention Score
             head_dim = self.num_heads*self.head_dim
             batch_atten_score = torch.matmul(q,repeat_kv(k,self.total_num_heads//self.num_kv_heads)) / torch.sqrt(torch.tensor(self.q_size,device=q.device,dtype=q.dtype))
             atten_mask = cache_fuse_metadata["prefill_atten_bias"]
             batch_atten_score = batch_atten_score + atten_mask
             batch_atten_score = torch.softmax(batch_atten_score,dim=-1)
+            end_time = time.time()
+            print(f"compute_as time: {end_time - start_time}s")
             # 找每个请求前top 30%的下标和后30%的下标a
             batch_top_indices = []
             batch_bottom_indices = []
@@ -260,6 +263,7 @@ class Qwen2Attention(nn.Module):
             batch_bottom_indices,_ = torch.sort(batch_bottom_indices)
             cache_fuse_metadata["has_token_indices"] = batch_top_indices
             cache_fuse_metadata["las_token_indices"] = batch_bottom_indices
+            
         if attn_metadata.decode_metadata and cache_fuse_metadata["enable_compute_as"] and cache_fuse_metadata["enable_kvshare"]:
             pass
         if attn_metadata.prefill_metadata and status in [1,2]:

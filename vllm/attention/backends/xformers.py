@@ -1,7 +1,7 @@
 """Attention layer with xFormers and PagedAttention."""
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Type
-
+import time
 import torch
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import (AttentionBias,
@@ -522,23 +522,19 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     cache_fuse_metadata["prefill_atten_bias"] = attn_bias
                     attn_metadata.prefill_metadata.attn_bias=None
                 elif cache_fuse_metadata["enable_kvshare"]:
-                    top_indices = torch.cat([cache_fuse_metadata["additional_map_indices"],cache_fuse_metadata["has_token_indices"]])
+                    top_indices = torch.cat([cache_fuse_metadata["additional_map_indices"],cache_fuse_metadata["has_token_indices"],cache_fuse_metadata["batch_seq_start_loc"][1:]-1])
                     top_indices = torch.unique(top_indices)
                     top_indices,_ = torch.sort(top_indices)
                     cache_fuse_metadata["imp_indices"] = top_indices
                     
-                    # 必须更新sample_selected_token_indices
-                    # cache_fuse_metadata["selected_token_indices"] = torch.tensor(len(top_indices)-1,device=query.device,dtype=torch.long)
                     last_token_indices = cache_fuse_metadata["batch_seq_start_loc"][1:]-1
                     # 假设last_token_indices的所有元素都在top_indices中
                     # 直接查找位置，不需要检查是否存在
                     positions = torch.tensor([torch.where(top_indices == idx)[0][0].item() for idx in last_token_indices], 
                                            device=query.device, dtype=torch.long)
-                    # 更新到selected_token_indices中
+
                     cache_fuse_metadata["selected_token_indices"] = positions
                             
-                        
-                        
                     query = query[top_indices,:,:]
                     batch_seq_start_loc = cache_fuse_metadata["batch_seq_start_loc"]
                     # 构造合理的attn_bias
@@ -571,8 +567,14 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     
                     cache_fuse_metadata["prefill_atten_bias"] = attn_bias
                     attn_metadata.prefill_metadata.attn_bias=None
-            else:
-                pass
+        elif attn_metadata.prefill_metadata and cache_fuse_metadata["prefill_atten_bias"] is None:
+            attn_bias = torch.zeros(1,query.shape[0],key.shape[0],device=query.device,dtype=query.dtype)
+            batch_seq_start_loc = attn_metadata.seq_start_loc
+            # if batch_seq_start_loc:
+            for i in range(len(batch_seq_start_loc)-1):
+                attn_bias[0,batch_seq_start_loc[i]:batch_seq_start_loc[i+1],batch_seq_start_loc[i]:batch_seq_start_loc[i+1]] = \
+                    torch.tril(torch.ones(batch_seq_start_loc[i+1]-batch_seq_start_loc[i],batch_seq_start_loc[i+1]-batch_seq_start_loc[i],device=query.device,dtype=query.dtype))
+            cache_fuse_metadata["prefill_atten_bias"] = attn_bias
             pass
             
             
@@ -872,14 +874,18 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 #         scale=self.scale,
                 #     )
                 
+                # start_time = time.time()
                 query = query.reshape(query.shape[0],query.shape[1],-1,query.shape[-1]).transpose(1,2)
                 key = key.reshape(key.shape[0],key.shape[1],-1,key.shape[-1]).transpose(1,2)
                 value = value.reshape(value.shape[0],value.shape[1],-1,value.shape[-1]).transpose(1,2)
+                # end_time = time.time()
+                # print(f"spda time: {end_time - start_time}s")
                 
                 output = torch.nn.functional.scaled_dot_product_attention(query,key,value,attn_mask=cache_fuse_metadata["prefill_atten_bias"])
                 out = output.transpose(1,2)
                 pass
             else:
+                # start_time = time.time()
                 out = xops.memory_efficient_attention_forward(
                     query,
                     key,
@@ -887,6 +893,14 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     attn_bias=attn_bias[0],
                     p=0.0,
                     scale=self.scale)
+                # query = query.reshape(query.shape[0],query.shape[1],-1,query.shape[-1]).transpose(1,2)
+                # key = key.reshape(key.shape[0],key.shape[1],-1,key.shape[-1]).transpose(1,2)
+                # value = value.reshape(value.shape[0],value.shape[1],-1,value.shape[-1]).transpose(1,2)
+
+                # output = torch.nn.functional.scaled_dot_product_attention(query,key,value,attn_mask=cache_fuse_metadata["prefill_atten_bias"])
+                # out = output.transpose(1,2)
+                # end_time = time.time()
+                # print(f"xformers time: {end_time - start_time}s")
             return out.view_as(original_query)
 
         # Attention with alibi slopes.

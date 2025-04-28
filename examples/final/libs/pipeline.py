@@ -42,7 +42,10 @@ class KVShareNewPipeline:
         model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["enable_only_compute_unreused"] = False
         model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["has_additional_value_error"] = False
         model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["las_additional_value_error"] = False
-        model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["enable_compute_as"] = False     
+        model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["enable_compute_as"] = False  
+        model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["prefill_atten_bias"] = None
+        model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["selected_token_indices"] = None
+        model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["batch_seq_start_loc"] = None
         model.llm_engine.model_executor.driver_worker.model_runner._kvshare_metadata.is_partial_compute = False
         num_layer = len(model.llm_engine.model_executor.driver_worker.model_runner.model.model.layers)
         for j in range(num_layer):
@@ -88,13 +91,7 @@ class KVShareNewPipeline:
     
     @staticmethod
     def full_compute(llm_model,sampling_params:SamplingParams,prompt:List[str]) -> List[RequestOutput]:
-        # llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["check"] = False
-        # llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata['collect'] = False
-        # llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["use_additional_indices"] = False
-        # llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["additional_map_indices"] = None
-        # llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["old_kv_map_indices"] = None
-        # llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["imp_indices"] = None
-        # llm_model.llm_engine.model_executor.driver_worker.model_runner._kvshare_metadata.is_partial_compute = False
+        llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["prefill_atten_bias"] = None
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["check"] = False
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata['collect'] = False
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["use_additional_indices"] = False
@@ -106,7 +103,9 @@ class KVShareNewPipeline:
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["enable_only_compute_unreused"] = False
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["has_additional_value_error"] = False
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["las_additional_value_error"] = False
-        llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["enable_compute_as"] = False     
+        llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["enable_compute_as"] = False    
+        llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["selected_token_indices"] = None
+        llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["batch_seq_start_loc"] = None 
         llm_model.llm_engine.model_executor.driver_worker.model_runner._kvshare_metadata.is_partial_compute = False
         # sampling_params = SamplingParams(temperature=0, max_tokens=1)
       
@@ -118,7 +117,8 @@ class KVShareNewPipeline:
     
     
     @staticmethod
-    def partial_compute(llm_model:LLM,sampling_params:SamplingParams, 
+    def partial_compute(llm_model:LLM,
+                        sampling_params:SamplingParams, 
                         batch_target_prompt,
                         target_kvcache,
                         reused_map_indices,
@@ -142,6 +142,9 @@ class KVShareNewPipeline:
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["has_additional_value_error"] = has_additional_value_error
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["las_additional_value_error"] = las_additional_value_error
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["enable_compute_as"] = enable_compute_as
+        llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["prefill_atten_bias"] = None
+        llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["selected_token_indices"] = None
+        llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["batch_seq_start_loc"] = None
 
         llm_model.llm_engine.model_executor.driver_worker.model_runner._kvshare_metadata.is_partial_compute = True
         

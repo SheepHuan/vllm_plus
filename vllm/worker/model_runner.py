@@ -1637,6 +1637,11 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         If cuda graph is required, this API automatically pads inputs.
         """
         start_time = time.time()
+        
+        self._kvshare_metadata.batch_decode_request_ids = []
+        self._kvshare_metadata.batch_prefill_request_ids = []
+        
+        
         model_input = self._prepare_model_input_tensors(
             seq_group_metadata_list, finished_requests_ids)
         if get_pp_group().is_last_rank:
@@ -1664,10 +1669,15 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             for batch_idx,seq_group_metadata in enumerate(seq_group_metadata_list):
                 # NOTE这里需要确认那些请求处于prefill阶段，那些请求处于decode阶段
                 if seq_group_metadata.is_prompt:
-                   
                     self._kvshare_metadata.batch_kvshare_metadata[int(seq_group_metadata.request_id)].prefill_tokens_slot_mapping = model_input.attn_metadata.slot_mapping[self._kvshare_metadata.batch_seq_start_loc[batch_idx]:self._kvshare_metadata.batch_seq_start_loc[batch_idx+1]]
                     self._kvshare_metadata.batch_kvshare_metadata[int(seq_group_metadata.request_id)].prefill_token_ids = model_input.input_tokens[self._kvshare_metadata.batch_seq_start_loc[batch_idx]:self._kvshare_metadata.batch_seq_start_loc[batch_idx+1]]
-                
+        # if model_input.attn_metadata.decode_metadata:
+        for batch_idx,seq_group_metadata in enumerate(seq_group_metadata_list):
+            if not seq_group_metadata.is_prompt:
+                self._kvshare_metadata.batch_decode_request_ids.append(int(seq_group_metadata.request_id))
+            else:
+                self._kvshare_metadata.batch_prefill_request_ids.append(int(seq_group_metadata.request_id))
+            
         if model_input.attn_metadata.prefill_metadata and self._kvshare_metadata.is_partial_compute:
             # 先定位这次是那些prefill请求
             self.model.model.cache_fuse_metadata["check"]  = True
@@ -1720,7 +1730,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                 prefill_atten_bias[batch_prompt_slice[i][0]:batch_prompt_slice[i][1],batch_prompt_slice[i][0]:batch_prompt_slice[i][1]] = 1.0
             
             self.model.model.cache_fuse_metadata['additional_map_indices'] = additional_map_indices
-            self.model.model.cache_fuse_metadata['selected_token_indices'] = selected_token_indices
+            # self.model.model.cache_fuse_metadata['selected_token_indices'] = selected_token_indices
             self.model.model.cache_fuse_metadata['old_kv_map_indices'] = old_kv_map_indices
             self.model.model.cache_fuse_metadata['prefill_atten_bias'] = prefill_atten_bias
             self.model.model.cache_fuse_metadata['batch_seq_start_loc'] = self._kvshare_metadata.batch_seq_start_loc
@@ -1810,12 +1820,13 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_forward_start.record()
 
         if not bypass_model_exec:
+            start_time = time.time()
             with set_forward_context(model_input.attn_metadata,
                                      self.vllm_config, virtual_engine):
                 # if self.model.model.cache_fuse_metadata['enable_kvshare']:
                 if model_input.attn_metadata.decode_metadata and self._kvshare_metadata.is_partial_compute and self.model.model.cache_fuse_metadata["enable_kvshare"]:
                     # 修改decode阶段的model_input
-                    self.model.model.cache_fuse_metadata['batch_seq_start_loc'] = self._kvshare_metadata.batch_seq_start_loc
+                    self.model.model.cache_fuse_metadata['batch_seq_start_loc'] = model_input.attn_metadata.seq_start_loc
                     block_tables_for_each_request = model_input.attn_metadata.block_tables
                     updated_input_tokens = model_input.input_tokens
                     updated_input_positions = model_input.input_positions
@@ -1824,7 +1835,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                     seq_lens_tensor = model_input.attn_metadata.decode_metadata.seq_lens_tensor
  
                     original_input_tokens_len = model_input.input_tokens.shape[0]
-                    for batch_idx,request_id in enumerate(self._kvshare_metadata.batch_prefill_request_ids):
+                    for batch_idx,request_id in enumerate(self._kvshare_metadata.batch_decode_request_ids):
                         prefill_las_token_indices = self._kvshare_metadata.batch_kvshare_metadata[request_id].prefill_las_token_indices
                         if (len(prefill_las_token_indices) == 0):
                             continue
@@ -1843,7 +1854,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                         updated_slot_mapping = torch.cat([updated_slot_mapping,las_tokens_slot_mapping])
                         # 更新seq_lens_tensor
                         seq_lens_tensor = torch.cat([seq_lens_tensor,las_token_indices+1])
-                        # seq_lens_tensor = seq_lens_tensor + (las_token_indices+1).detach().cpu().tolist()
+                        
                         for _ in range(padd_num):
                             updated_block_tables = torch.cat([updated_block_tables,block_tables_for_each_request[batch_idx].unsqueeze(0)],dim=0)
                     model_input.attn_metadata.decode_metadata.block_tables = updated_block_tables
@@ -1871,7 +1882,16 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                         **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
                                                     device=self.device),
                         **seqlen_agnostic_kwargs)
-            
+            end_time = time.time()
+            if self._kvshare_metadata.is_partial_compute and model_input.attn_metadata.prefill_metadata \
+                and self.model.model.cache_fuse_metadata['enable_kvshare']:
+                print("************"*10)
+                print(f"kvshare prefill time: {end_time - start_time}s")
+                print("hidden_or_intermediate_states shape: ",hidden_or_intermediate_states.shape)
+            elif model_input.attn_metadata.prefill_metadata and not self._kvshare_metadata.is_partial_compute:
+                print("************"*10)
+                print(f"full_compute prefill time: {end_time - start_time}s")
+                print("hidden_or_intermediate_states shape: ",hidden_or_intermediate_states.shape)
             if self.model.model.cache_fuse_metadata['collect'] and model_input.attn_metadata.prefill_metadata:
                 batch_seq_kv = [[] for _ in range(len(self._hack_kv_seq))]
                

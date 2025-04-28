@@ -500,7 +500,7 @@ class KVEditor:
                         reused_map_indices.extend(list(range(move[1][0],move[1][1]+1)))
                 target_kvcache.append(torch.stack([key_cache,value_cache],dim=0))
             unreused_map_indices = list(set(range(len(target_token_ids))) - set(reused_map_indices))
-            
+            unreused_map_indices.append(len(target_token_ids)-1)
             if tokenizer is not None:
                 # 定义需要去除复用的标点符号
                 punctuation_tokens = ['.', ',', '!', '?', ';', ':', '\n', '。', '，', '！', '？', '；', '：']
