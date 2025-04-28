@@ -240,9 +240,14 @@ class Qwen2Attention(nn.Module):
                 atten_score = batch_atten_score[start_loc:end_loc,end_loc-1]
                 top_indices = torch.topk(atten_score,k=int(has_top_ratio*atten_score.shape[0])).indices
                 bottom_indices = torch.topk(atten_score,k=int(las_top_ratio*atten_score.shape[0]),largest=False).indices
-                # 选择对应top_indices和bottom_indices中V值误差最高的30%
-                
-                pass
+                # bottom_indices中V值误差最高的30%
+                value_error = torch.sum(torch.abs(v[bottom_indices+start_loc,:] - old_kv[1][bottom_indices+start_loc,:]),dim=-1)
+                # 获取误差值大于0的掩码
+                positive_error_mask = value_error > 0.01
+                # 获取误差值大于0的索引
+                positive_error_indices = torch.where(positive_error_mask)[0]
+                # 更新bottom_indices
+                bottom_indices = bottom_indices[positive_error_indices]
                 
                 
                 batch_top_indices.append(top_indices+start_loc)

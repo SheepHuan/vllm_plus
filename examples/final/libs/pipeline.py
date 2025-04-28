@@ -88,12 +88,25 @@ class KVShareNewPipeline:
     
     @staticmethod
     def full_compute(llm_model,sampling_params:SamplingParams,prompt:List[str]) -> List[RequestOutput]:
+        # llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["check"] = False
+        # llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata['collect'] = False
+        # llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["use_additional_indices"] = False
+        # llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["additional_map_indices"] = None
+        # llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["old_kv_map_indices"] = None
+        # llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["imp_indices"] = None
+        # llm_model.llm_engine.model_executor.driver_worker.model_runner._kvshare_metadata.is_partial_compute = False
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["check"] = False
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata['collect'] = False
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["use_additional_indices"] = False
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["additional_map_indices"] = None
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["old_kv_map_indices"] = None
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["imp_indices"] = None
+        llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["enable_kvshare"] = False
+        llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["enable_cacheblend"] = False
+        llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["enable_only_compute_unreused"] = False
+        llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["has_additional_value_error"] = False
+        llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["las_additional_value_error"] = False
+        llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["enable_compute_as"] = False     
         llm_model.llm_engine.model_executor.driver_worker.model_runner._kvshare_metadata.is_partial_compute = False
         # sampling_params = SamplingParams(temperature=0, max_tokens=1)
       
@@ -137,7 +150,7 @@ class KVShareNewPipeline:
             metadata.reused_map_indices = torch.tensor(reused_map_indices[idx],device=device,dtype=torch.long)
             metadata.unreused_map_indices = torch.tensor(unreused_map_indices[idx],device=device,dtype=torch.long)
             metadata.kvcache = target_kvcache[idx]
-            metadata.sample_selected_token_indices = torch.tensor(len(unreused_map_indices[idx])-1,device=device,dtype=torch.long)
+            metadata.sample_selected_token_indices = torch.tensor([len(unreused_map_indices[idx])-1],device=device,dtype=torch.long)
             llm_model.llm_engine.model_executor.driver_worker.model_runner._kvshare_metadata.batch_kvshare_metadata[request_id] = metadata
             
         
@@ -153,8 +166,12 @@ class KVShareNewPipeline:
         for idx,request_id in enumerate(next_batch_request_ids):
             llm_model.llm_engine.model_executor.driver_worker.model_runner._kvshare_metadata.batch_kvshare_metadata[request_id].kvcache.to("cpu")
         llm_model.llm_engine.model_executor.driver_worker.model_runner._kvshare_metadata.batch_kvshare_metadata = dict()
+        llm_model.llm_engine.model_executor.driver_worker.model_runner._kvshare_metadata.batch_seq_start_loc = None
+        
+        
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.old_kvs = [[None,None]] * len(llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.layers)  
         llm_model.llm_engine.model_executor.driver_worker.model_runner._kvshare_metadata.is_partial_compute = False
+        # llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.old_kvs = None
         
         torch.cuda.empty_cache()
         

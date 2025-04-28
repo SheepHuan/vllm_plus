@@ -12,6 +12,8 @@ from libs.edit2 import KVEditor
 
 from libs.pipeline import KVShareNewPipeline
 from vllm import LLM,SamplingParams
+import vllm.utils
+
 
 def full_compute(pipeline:KVShareNewPipeline,
                  batch_candidate_docs:List[str],
@@ -31,6 +33,14 @@ def full_compute(pipeline:KVShareNewPipeline,
     batch_candidate_prompts = [template_text.format(prompt=doc) for doc in batch_candidate_docs]
     batch_target_prompts = [template_text.format(prompt=doc) for doc in batch_target_docs]
 
+    # with vllm.utils.cprofile_context("vllm_profile/full_compute.prof"):
+    gt_outputs = pipeline.full_compute(
+        pipeline.model,
+        sampling_params,
+        batch_target_prompts,
+    )
+
+    
     batch_candidate_kvcache,batch_candidate_outputs,_ = pipeline.get_kvcache_by_full_compute(
         pipeline.model,
         sampling_params,
@@ -39,23 +49,21 @@ def full_compute(pipeline:KVShareNewPipeline,
     pass
     max_request_id = max([int(output.request_id) for output in batch_candidate_outputs])+1
     
-    # compute_len = 1
-    # batch_sample_selected_token_indices = [[compute_len-1] for _ in range(len(batch_prompts))]
-    # batch_unreused_map_indices = [list(range(len(tokenizer.encode(prompt))-compute_len,len(tokenizer.encode(prompt)))) for prompt in batch_prompts]
-    # batch_reused_map_indices = [list(range(len(tokenizer.encode(prompt))-compute_len)) for prompt in batch_prompts]
+
     next_batch_request_ids = [max_request_id+ii for ii in range(len(batch_target_prompts))]
     
     batch_candidate_token_ids = [tokenizer.encode(prompt) for prompt in batch_candidate_prompts]
     batch_target_token_ids = [tokenizer.encode(prompt) for prompt in batch_target_prompts]
     
     # batch_candidate_kvcache = torch.stack(batch_candidate_kvcache,dim=0)
-    batch_target_kvcache,batch_reused_map_indices,batch_unreused_map_indices= KVEditor.kvedit_v2(
-                                batch_candidate_token_ids,
-                                batch_target_token_ids,
-                                batch_candidate_kvcache,
-                                tokenizer=tokenizer,
-                                window_size=2)
- 
+    batch_target_kvcache,batch_reused_map_indices,batch_unreused_map_indices= KVEditor.batch_kvedit_v2(
+            batch_target_token_ids,
+            batch_candidate_token_ids,
+            batch_candidate_kvcache,
+            tokenizer=None,
+            window_size=5)
+    # pipeline.model.start_profile()
+    # with vllm.utils.cprofile_context("vllm_profile/partial_compute.prof"):
     batch_pc_outputs = pipeline.partial_compute(
         pipeline.model,
         sampling_params,
@@ -71,29 +79,38 @@ def full_compute(pipeline:KVShareNewPipeline,
         las_additional_value_error = enbale_las_token_error,
         enable_compute_as=True
     )
-     
-    for batch_idx in range(len(batch_pc_outputs)):
-        print("==============="*5)
-        print(batch_pc_outputs[batch_idx].outputs[0].text)
+    # pipeline.model.stop_profile()
+    for gt_output,pc_output in zip(gt_outputs,batch_pc_outputs):
+        print("==================="*10)
+        print("******partial_compute_output******")
+        print(f"time for first token:{(pc_output.metrics.first_token_time - gt_output.metrics.first_scheduled_time)*1000}ms")
+        print(f"time for last token:{(pc_output.metrics.last_token_time - gt_output.metrics.first_scheduled_time)*1000}ms")
+        print(pc_output.outputs[0].text)
+        print("******full_compute_output******")
+        print(f"time for first token:{(gt_output.metrics.first_token_time - gt_output.metrics.first_scheduled_time)*1000}ms")
+        print(f"time for last token:{(gt_output.metrics.last_token_time - gt_output.metrics.first_scheduled_time)*1000}ms")
+        print(gt_output.outputs[0].text)
+        print("==================="*10)
 if __name__ == "__main__":
     import os
+    os.environ["VLLM_TORCH_PROFILER_DIR"] = "/root/code/vllm_plus/vllm_profile"
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     os.environ["VLLM_USE_MODELSCOPE"] = "True"
     # os.environ["VLLM_ATTENTION_BACKEND"] = "XFORMERS"
     # model_name = "Qwen/Qwen2.5-32B-Instruct-GPTQ-Int4"
-    model_name = "Qwen/Qwen2.5-1.5B-Instruct"
+    model_name = "Qwen/Qwen2.5-7B-Instruct"
     # model_name = "LLM-Research/Meta-Llama-3.1-8B-Instruct"
     pipeline = KVShareNewPipeline(model_name,device="cuda:0")
     
     batch_target_docs = [
-        "I come from China, Hello, What's your name?",
-        "I come from France, What is the capital of France and China?",
-        "I come from England, What is the capital of England, France, Germany and USA?"
+        "我来自中国安徽，我的家乡是安徽芜湖，你能帮我生成一段关于我的家乡的介绍吗？",
+        "你叫什么名字，你都有那些功能？你帮我解决什么问题？",
+        "中国上海和美国纽约，哪个城市更权威？"
     ]
     batch_candidate_docs = [
-        "Hello, What's your name?",
-        "What is the capital of France and China?",
-        "What is the capital of England, France, Germany and USA?"
+        "我来自中国湖南，我的家乡是湖南长沙，你能帮我生成一段关于我的家乡的介绍吗？",
+        "你现在给你取名字叫做“华为小艺”，你告诉我，你都有那些功能？你帮我解决什么问题？",
+        "中国北京和美国纽约，哪个城市更权威？"
     ]
     
     full_compute(pipeline,

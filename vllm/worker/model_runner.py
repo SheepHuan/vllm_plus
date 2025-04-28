@@ -1636,6 +1636,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
         If cuda graph is required, this API automatically pads inputs.
         """
+        start_time = time.time()
         model_input = self._prepare_model_input_tensors(
             seq_group_metadata_list, finished_requests_ids)
         if get_pp_group().is_last_rank:
@@ -1724,10 +1725,12 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             self.model.model.cache_fuse_metadata['prefill_atten_bias'] = prefill_atten_bias
             self.model.model.cache_fuse_metadata['batch_seq_start_loc'] = self._kvshare_metadata.batch_seq_start_loc
             self.model.model.old_kvs= torch.cat(reused_kvcache,dim=2).to(self.device)
-            
+            end_time = time.time()
+            print(f"prepare_model_input time: {end_time - start_time}s")
         else:
             self.model.model.cache_fuse_metadata['check'] = False
 
+        
         return dataclasses.replace(model_input,
                                    sampling_metadata=sampling_metadata,
                                    is_prompt=is_prompt,
@@ -1744,6 +1747,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
     ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
         if num_steps > 1:
             raise ValueError("num_steps > 1 is not supported in ModelRunner")
+
+        start_time = time.time()
 
         if self.lora_config:
             assert model_input.lora_requests is not None
@@ -1944,7 +1949,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
             self.model.model.cache_fuse_metadata['check'] = False
             
-            self.model.model.old_kvs = self.model.model.old_kvs.to("cpu")
+            # self.model.model.old_kvs = self.model.model.old_kvs.to("cpu")
             logits = self.model.compute_logits(hidden_or_intermediate_states, model_input.sampling_metadata)
             
         else:

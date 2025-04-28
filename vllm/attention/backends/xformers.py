@@ -523,8 +523,22 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     attn_metadata.prefill_metadata.attn_bias=None
                 elif cache_fuse_metadata["enable_kvshare"]:
                     top_indices = torch.cat([cache_fuse_metadata["additional_map_indices"],cache_fuse_metadata["has_token_indices"]])
+                    top_indices = torch.unique(top_indices)
+                    top_indices,_ = torch.sort(top_indices)
                     cache_fuse_metadata["imp_indices"] = top_indices
                     
+                    # 必须更新sample_selected_token_indices
+                    # cache_fuse_metadata["selected_token_indices"] = torch.tensor(len(top_indices)-1,device=query.device,dtype=torch.long)
+                    last_token_indices = cache_fuse_metadata["batch_seq_start_loc"][1:]-1
+                    # 假设last_token_indices的所有元素都在top_indices中
+                    # 直接查找位置，不需要检查是否存在
+                    positions = torch.tensor([torch.where(top_indices == idx)[0][0].item() for idx in last_token_indices], 
+                                           device=query.device, dtype=torch.long)
+                    # 更新到selected_token_indices中
+                    cache_fuse_metadata["selected_token_indices"] = positions
+                            
+                        
+                        
                     query = query[top_indices,:,:]
                     batch_seq_start_loc = cache_fuse_metadata["batch_seq_start_loc"]
                     # 构造合理的attn_bias
