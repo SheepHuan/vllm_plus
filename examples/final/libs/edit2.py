@@ -486,33 +486,36 @@ class KVEditor:
         reused_map_indices = []
         unreused_map_indices = []
         target_kvcache = []
-        for move in moves:
-            layer_num = len(candidate_kvcache)
-            kv_dim = candidate_kvcache.shape[-1]
+        # for move in moves:
+        layer_num = len(candidate_kvcache)
+        kv_dim = candidate_kvcache.shape[-1]
+        
+        for layer_idx in range(layer_num):
+            key_cache = torch.zeros([len(target_token_ids),kv_dim],device=candidate_kvcache[layer_idx][0].device,dtype=candidate_kvcache[layer_idx][0].dtype)
+            value_cache = torch.zeros([len(target_token_ids),kv_dim],device=candidate_kvcache[layer_idx][0].device,dtype=candidate_kvcache[layer_idx][0].dtype)
+            for move in move_sequence:
+                key_cache[move[1][0]:move[1][1]+1, :] = candidate_kvcache[layer_idx,0,move[0][0]:move[0][1]+1, :]
+                value_cache[move[1][0]:move[1][1]+1, :] = candidate_kvcache[layer_idx,1,move[0][0]:move[0][1]+1, :]
+                if layer_idx == 0:
+                    reused_map_indices.extend(list(range(move[1][0],move[1][1]+1)))
+            target_kvcache.append(torch.stack([key_cache,value_cache],dim=0))
             
-            for layer_idx in range(layer_num):
-                key_cache = torch.zeros([len(target_token_ids),kv_dim],device=candidate_kvcache[layer_idx][0].device,dtype=candidate_kvcache[layer_idx][0].dtype)
-                value_cache = torch.zeros([len(target_token_ids),kv_dim],device=candidate_kvcache[layer_idx][0].device,dtype=candidate_kvcache[layer_idx][0].dtype)
-                for move in move_sequence:
-                    key_cache[move[1][0]:move[1][1]+1, :] = candidate_kvcache[layer_idx,0,move[0][0]:move[0][1]+1, :]
-                    value_cache[move[1][0]:move[1][1]+1, :] = candidate_kvcache[layer_idx,1,move[0][0]:move[0][1]+1, :]
-                    if layer_idx == 0:
-                        reused_map_indices.extend(list(range(move[1][0],move[1][1]+1)))
-                target_kvcache.append(torch.stack([key_cache,value_cache],dim=0))
-            unreused_map_indices = list(set(range(len(target_token_ids))) - set(reused_map_indices))
-            unreused_map_indices.append(len(target_token_ids)-1)
-            if tokenizer is not None:
-                # 定义需要去除复用的标点符号
-                punctuation_tokens = ['.', ',', '!', '?', ';', ':', '\n', '。', '，', '！', '？', '；', '：']
-                punctuation_tokens = [tokenizer.encode(t)[0] for t in punctuation_tokens]
-                
-                # 去除标点符号的复用
-                for idx in reused_map_indices[:]:
-                    if target_token_ids[idx] in punctuation_tokens:
-                        reused_map_indices.remove(idx)
-                        unreused_map_indices.append(idx)
+        reused_map_indices = list(set(reused_map_indices))
+        unreused_map_indices = list(set(range(len(target_token_ids))) - set(reused_map_indices))
+        # 强制最后一个token复用
+        unreused_map_indices.append(len(target_token_ids)-1)
+        if tokenizer is not None:
+            # 定义需要去除复用的标点符号
+            punctuation_tokens = ['.', ',', '!', '?', ';', ':', '\n', '。', '，', '！', '？', '；', '：']
+            punctuation_tokens = [tokenizer.encode(t)[0] for t in punctuation_tokens]
             
-            unreused_map_indices = list(set(unreused_map_indices))
+            # 去除标点符号的复用
+            for idx in reused_map_indices[:]:
+                if target_token_ids[idx] in punctuation_tokens:
+                    reused_map_indices.remove(idx)
+                    unreused_map_indices.append(idx)
+        
+        unreused_map_indices = list(set(unreused_map_indices))
 
         unreused_map_indices = sorted(list(set(unreused_map_indices)))
         reused_map_indices = sorted(list(set(reused_map_indices)))

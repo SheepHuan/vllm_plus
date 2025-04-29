@@ -1736,7 +1736,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             self.model.model.cache_fuse_metadata['batch_seq_start_loc'] = self._kvshare_metadata.batch_seq_start_loc
             self.model.model.old_kvs= torch.cat(reused_kvcache,dim=2).to(self.device)
             end_time = time.time()
-            print(f"prepare_model_input time: {end_time - start_time}s")
+            # print(f"prepare_model_input time: {end_time - start_time}s")
         else:
             self.model.model.cache_fuse_metadata['check'] = False
 
@@ -1883,15 +1883,15 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                                                     device=self.device),
                         **seqlen_agnostic_kwargs)
             end_time = time.time()
-            if self._kvshare_metadata.is_partial_compute and model_input.attn_metadata.prefill_metadata \
-                and self.model.model.cache_fuse_metadata['enable_kvshare']:
-                print("************"*10)
-                print(f"kvshare prefill time: {end_time - start_time}s")
-                print("hidden_or_intermediate_states shape: ",hidden_or_intermediate_states.shape)
-            elif model_input.attn_metadata.prefill_metadata and not self._kvshare_metadata.is_partial_compute:
-                print("************"*10)
-                print(f"full_compute prefill time: {end_time - start_time}s")
-                print("hidden_or_intermediate_states shape: ",hidden_or_intermediate_states.shape)
+            # if self._kvshare_metadata.is_partial_compute and model_input.attn_metadata.prefill_metadata \
+            #     and self.model.model.cache_fuse_metadata['enable_kvshare']:
+            #     print("************"*10)
+            #     print(f"kvshare prefill time: {end_time - start_time}s")
+            #     print("hidden_or_intermediate_states shape: ",hidden_or_intermediate_states.shape)
+            # elif model_input.attn_metadata.prefill_metadata and not self._kvshare_metadata.is_partial_compute:
+            #     print("************"*10)
+            #     print(f"full_compute prefill time: {end_time - start_time}s")
+            #     print("hidden_or_intermediate_states shape: ",hidden_or_intermediate_states.shape)
             if self.model.model.cache_fuse_metadata['collect'] and model_input.attn_metadata.prefill_metadata:
                 batch_seq_kv = [[] for _ in range(len(self._hack_kv_seq))]
                
@@ -1965,7 +1965,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         
         if self.model.model.cache_fuse_metadata['check']:
             temp_data = model_input.sampling_metadata.selected_token_indices.clone()
-            model_input.sampling_metadata.selected_token_indices = self.model.model.cache_fuse_metadata['selected_token_indices'].clone().to(temp_data.device).to(temp_data.dtype)
+            model_input.sampling_metadata.selected_token_indices = self.model.model.cache_fuse_metadata['selected_token_indices'].to(temp_data.device).to(temp_data.dtype)
 
             self.model.model.cache_fuse_metadata['check'] = False
             

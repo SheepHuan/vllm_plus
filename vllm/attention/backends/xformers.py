@@ -510,15 +510,30 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 # # 去除前缀和后缀
                 if cache_fuse_metadata["enable_cacheblend"]:
                     old_kv_map_indices =torch.sort(cache_fuse_metadata["old_kv_map_indices"])[0]
-                    topk_error_num = max(2,int(0.6*len(old_kv_map_indices)))
+                    topk_error_num = max(1,int(0.15*len(old_kv_map_indices)))
                     temp_diff = torch.sum((value[old_kv_map_indices,:,:]-value_old[old_kv_map_indices,:,:])**2, dim=[1,2])
                     top_indices = torch.topk(temp_diff, k=topk_error_num).indices
                     top_indices = torch.cat([old_kv_map_indices[top_indices],cache_fuse_metadata["additional_map_indices"]])
                     top_indices = torch.unique(top_indices)
                     top_indices,_ = torch.sort(top_indices)
                     cache_fuse_metadata["imp_indices"] = top_indices
+                    
+                    last_token_indices = cache_fuse_metadata["batch_seq_start_loc"][1:]-1
+                    # 假设last_token_indices的所有元素都在top_indices中
+                    # 直接查找位置，不需要检查是否存在
+                    positions = torch.tensor([torch.where(top_indices == idx)[0][0].item() for idx in last_token_indices], 
+                                           device=query.device, dtype=torch.long)
+
+                    cache_fuse_metadata["selected_token_indices"] = positions
+                    
                     query = query[top_indices,:,:]
-                    attn_bias = LowerTriangularFromBottomRightMask()
+                    # attn_bias = LowerTriangularFromBottomRightMask()
+                    attn_bias = torch.zeros(1,query.shape[0],old_kv[0].shape[0],device=query.device,dtype=query.dtype)
+                    for idx,index in enumerate(top_indices):
+                        for i in range(len(cache_fuse_metadata["batch_seq_start_loc"])-1):
+                            if index >= cache_fuse_metadata["batch_seq_start_loc"][i] and index < cache_fuse_metadata["batch_seq_start_loc"][i+1]:
+                                attn_bias[:,idx,cache_fuse_metadata["batch_seq_start_loc"][i]:index+1] = 1
+                    
                     cache_fuse_metadata["prefill_atten_bias"] = attn_bias
                     attn_metadata.prefill_metadata.attn_bias=None
                 elif cache_fuse_metadata["enable_kvshare"]:
@@ -547,11 +562,22 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     attn_metadata.prefill_metadata.attn_bias=None
                     
                 elif cache_fuse_metadata["enable_only_compute_unreused"]:
-                    top_indices = cache_fuse_metadata["additional_map_indices"]
+                    top_indices = torch.cat([cache_fuse_metadata["additional_map_indices"],cache_fuse_metadata["batch_seq_start_loc"][1:]-1])
                     if cache_fuse_metadata["has_additional_value_error"]:
                         top_indices = torch.cat([cache_fuse_metadata["additional_map_indices"],cache_fuse_metadata["las_token_indices"]])
                     elif cache_fuse_metadata["las_additional_value_error"]:
                         top_indices = torch.cat([cache_fuse_metadata["additional_map_indices"],cache_fuse_metadata["has_token_indices"]])
+                    top_indices = torch.unique(top_indices)
+                    top_indices,_ = torch.sort(top_indices)
+                    last_token_indices = cache_fuse_metadata["batch_seq_start_loc"][1:]-1
+                    # 假设last_token_indices的所有元素都在top_indices中
+                    # 直接查找位置，不需要检查是否存在
+                    positions = torch.tensor([torch.where(top_indices == idx)[0][0].item() for idx in last_token_indices], 
+                                           device=query.device, dtype=torch.long)
+
+                    cache_fuse_metadata["selected_token_indices"] = positions
+                    
+                    
                     
                     cache_fuse_metadata["imp_indices"] = top_indices
                     query = query[top_indices,:,:]
@@ -863,18 +889,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             key = key.unsqueeze(0)
             value = value.unsqueeze(0)
             if status in [1,2]:
-                #import pdb
-                #pdb.set_trace()
-                # out = xops.memory_efficient_attention_forward(
-                #         query,
-                #         key,
-                #         value,
-                #         attn_bias=cache_fuse_metadata["attn_bias"],
-                #         p=0.0,
-                #         scale=self.scale,
-                #     )
-                
-                # start_time = time.time()
+
                 query = query.reshape(query.shape[0],query.shape[1],-1,query.shape[-1]).transpose(1,2)
                 key = key.reshape(key.shape[0],key.shape[1],-1,key.shape[-1]).transpose(1,2)
                 value = value.reshape(value.shape[0],value.shape[1],-1,value.shape[-1]).transpose(1,2)

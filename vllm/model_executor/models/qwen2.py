@@ -224,7 +224,7 @@ class Qwen2Attention(nn.Module):
         if attn_metadata.prefill_metadata and cache_fuse_metadata["enable_compute_as"] and status==1:
             start_time = time.time()
             # 计算Attention Score
-            head_dim = self.num_heads*self.head_dim
+            # head_dim = self.num_heads*self.head_dim
             batch_atten_score = torch.matmul(q,repeat_kv(k,self.total_num_heads//self.num_kv_heads)) / torch.sqrt(torch.tensor(self.q_size,device=q.device,dtype=q.dtype))
             atten_mask = cache_fuse_metadata["prefill_atten_bias"]
             batch_atten_score = batch_atten_score + atten_mask
@@ -242,6 +242,16 @@ class Qwen2Attention(nn.Module):
                 end_loc = cache_fuse_metadata["batch_seq_start_loc"][batch_idx+1]
                 atten_score = batch_atten_score[start_loc:end_loc,end_loc-1]
                 top_indices = torch.topk(atten_score,k=int(has_top_ratio*atten_score.shape[0])).indices
+                
+                # 过滤top_indices中V值误差较大的token
+                value_error_top = torch.sum(torch.abs(v[top_indices+start_loc,:] - old_kv[1][top_indices+start_loc,:]),dim=-1)
+                # 获取误差值小于阈值的掩码
+                small_error_mask = value_error_top < 0.01
+                # 获取误差值小于阈值的索引
+                small_error_indices = torch.where(small_error_mask)[0]
+                # 更新top_indices
+                top_indices = top_indices[small_error_indices]
+                
                 bottom_indices = torch.topk(atten_score,k=int(las_top_ratio*atten_score.shape[0]),largest=False).indices
                 # bottom_indices中V值误差最高的30%
                 value_error = torch.sum(torch.abs(v[bottom_indices+start_loc,:] - old_kv[1][bottom_indices+start_loc,:]),dim=-1)
@@ -251,7 +261,6 @@ class Qwen2Attention(nn.Module):
                 positive_error_indices = torch.where(positive_error_mask)[0]
                 # 更新bottom_indices
                 bottom_indices = bottom_indices[positive_error_indices]
-                
                 
                 batch_top_indices.append(top_indices+start_loc)
                 batch_bottom_indices.append(bottom_indices+start_loc)
@@ -263,30 +272,28 @@ class Qwen2Attention(nn.Module):
             batch_bottom_indices,_ = torch.sort(batch_bottom_indices)
             cache_fuse_metadata["has_token_indices"] = batch_top_indices
             cache_fuse_metadata["las_token_indices"] = batch_bottom_indices
-            
-        if attn_metadata.decode_metadata and cache_fuse_metadata["enable_compute_as"] and cache_fuse_metadata["enable_kvshare"]:
-            pass
-        if attn_metadata.prefill_metadata and status in [1,2]:
-            # 添加误差
-            if cache_fuse_metadata["has_additional_value_error"]:
-                # 创建一个从1到10的递增序列，长度为64
-                base_error = torch.linspace(1, 10, 64, device=old_kv[0].device, dtype=old_kv[0].dtype)
-                # 将base_error重复到所需的长度
-                repeated_error = base_error.repeat(len(cache_fuse_metadata["has_token_indices"]) // 64 + 1)
-                # 截取到所需的长度
-                random_error = repeated_error[:len(cache_fuse_metadata["has_token_indices"])]
-                # 在最后一个维度上添加误差
-                old_kv[0][cache_fuse_metadata["has_token_indices"],:] = old_kv[0][cache_fuse_metadata["has_token_indices"],:] + random_error.unsqueeze(-1)
-                # old_kv[1][cache_fuse_metadata["has_token_indices"],:] = old_kv[1][cache_fuse_metadata["has_token_indices"],:] + random_error.unsqueeze(-1)
-            elif cache_fuse_metadata["las_additional_value_error"]:
-                # 创建一个从1到10的递增序列，长度为64
-                base_error = torch.linspace(1, 10, 64, device=old_kv[0].device, dtype=old_kv[0].dtype)
-                # 将base_error重复到所需的长度
-                repeated_error = base_error.repeat(len(cache_fuse_metadata["las_token_indices"]) // 64 + 1)
-                # 截取到所需的长度
-                random_error = repeated_error[:len(cache_fuse_metadata["las_token_indices"])]
-                # 在最后一个维度上添加误差
-                old_kv[0][cache_fuse_metadata["has_token_indices"],:] = old_kv[0][cache_fuse_metadata["has_token_indices"],:] + random_error.unsqueeze(-1)
+        
+        # if attn_metadata.prefill_metadata and status in [1,2]:
+        #     # 添加误差
+        #     if cache_fuse_metadata["has_additional_value_error"]:
+        #         # 创建一个从1到10的递增序列，长度为64
+        #         base_error = torch.linspace(1, 10, 64, device=old_kv[0].device, dtype=old_kv[0].dtype)
+        #         # 将base_error重复到所需的长度
+        #         repeated_error = base_error.repeat(len(cache_fuse_metadata["has_token_indices"]) // 64 + 1)
+        #         # 截取到所需的长度
+        #         random_error = repeated_error[:len(cache_fuse_metadata["has_token_indices"])]
+        #         # 在最后一个维度上添加误差
+        #         old_kv[0][cache_fuse_metadata["has_token_indices"],:] = old_kv[0][cache_fuse_metadata["has_token_indices"],:] + random_error.unsqueeze(-1)
+        #         # old_kv[1][cache_fuse_metadata["has_token_indices"],:] = old_kv[1][cache_fuse_metadata["has_token_indices"],:] + random_error.unsqueeze(-1)
+        #     elif cache_fuse_metadata["las_additional_value_error"]:
+        #         # 创建一个从1到10的递增序列，长度为64
+        #         base_error = torch.linspace(1, 10, 64, device=old_kv[0].device, dtype=old_kv[0].dtype)
+        #         # 将base_error重复到所需的长度
+        #         repeated_error = base_error.repeat(len(cache_fuse_metadata["las_token_indices"]) // 64 + 1)
+        #         # 截取到所需的长度
+        #         random_error = repeated_error[:len(cache_fuse_metadata["las_token_indices"])]
+        #         # 在最后一个维度上添加误差
+        #         old_kv[0][cache_fuse_metadata["has_token_indices"],:] = old_kv[0][cache_fuse_metadata["has_token_indices"],:] + random_error.unsqueeze(-1)
 
         q, k = self.rotary_emb(positions, q, k)
         # v = v*1.1640
@@ -467,8 +474,8 @@ class Qwen2Model(nn.Module):
             "has_token_indices":None,
             "last_token_indices":None,
             "batch_seq_start_loc":None,
-            "las_top_ratio":0.7,
-            "has_top_ratio":0.3,
+            "las_top_ratio":0.85,
+            "has_top_ratio":0.15,
             "fake_q":None,
             }     
         self.old_kvs = [[None,None]] * len(self.layers)  

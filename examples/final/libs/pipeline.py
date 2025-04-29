@@ -174,7 +174,7 @@ class KVShareNewPipeline:
         
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.old_kvs = [[None,None]] * len(llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.layers)  
         llm_model.llm_engine.model_executor.driver_worker.model_runner._kvshare_metadata.is_partial_compute = False
-        # llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.old_kvs = None
+        llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.old_kvs = None
         
         torch.cuda.empty_cache()
         
