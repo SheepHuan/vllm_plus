@@ -1824,7 +1824,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             with set_forward_context(model_input.attn_metadata,
                                      self.vllm_config, virtual_engine):
                 # if self.model.model.cache_fuse_metadata['enable_kvshare']:
-                if model_input.attn_metadata.decode_metadata and self._kvshare_metadata.is_partial_compute and self.model.model.cache_fuse_metadata["enable_kvshare"]:
+                if model_input.attn_metadata.decode_metadata and self._kvshare_metadata.is_partial_compute and self.model.model.cache_fuse_metadata["enable_kvshare"] \
+                    and self.model.model.cache_fuse_metadata["enable_kvshare_decode"]:
                     # 修改decode阶段的model_input
                     self.model.model.cache_fuse_metadata['batch_seq_start_loc'] = model_input.attn_metadata.seq_start_loc
                     block_tables_for_each_request = model_input.attn_metadata.block_tables

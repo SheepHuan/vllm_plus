@@ -130,7 +130,7 @@ Summarize and condense the following text into a short single sentence.\n{text}<
             batch_target_token_ids =  [tokenizer.encode(item["target_doc"]) for item in batch_items_part]
             batch_target_prompts =   [item["target_doc"] for item in batch_items_part]
             batch_candidate_kvcache = [
-                torch.load(item["kvcache"]) for item in batch_items_part
+                torch.load(item["kvcache"], weights_only=True) for item in batch_items_part
             ]
             batch_target_kvcache,batch_reused_map_indices,batch_unreused_map_indices= KVEditor.batch_kvedit_v2(
                 batch_target_token_ids,

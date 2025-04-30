@@ -503,22 +503,25 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             # Huan: 预缓存的key和value的形状需要调整
             key_old = old_kv[0].view(-1, self.num_kv_heads, self.head_size)
             value_old = old_kv[1].view(-1, self.num_kv_heads, self.head_size)
+        
+        
         if status in [1]:
             # FIXME: 需要修改,防止出现additional_map_indices为空的情况
             if  cache_fuse_metadata["use_additional_indices"]:
                 # cache_fuse_metadata["imp_indices"] = torch.tensor(list(range(0,key.shape[0])),device=query.device)
                 # # 去除前缀和后缀
                 if cache_fuse_metadata["enable_cacheblend"]:
+                    last_token_indices = cache_fuse_metadata["batch_seq_start_loc"][1:]-1
                     old_kv_map_indices =torch.sort(cache_fuse_metadata["old_kv_map_indices"])[0]
-                    topk_error_num = max(1,int(0.15*len(old_kv_map_indices)))
+                    topk_error_num = max(1,int(cache_fuse_metadata["recomp_ratio"]*len(old_kv_map_indices)))
                     temp_diff = torch.sum((value[old_kv_map_indices,:,:]-value_old[old_kv_map_indices,:,:])**2, dim=[1,2])
                     top_indices = torch.topk(temp_diff, k=topk_error_num).indices
-                    top_indices = torch.cat([old_kv_map_indices[top_indices],cache_fuse_metadata["additional_map_indices"]])
+                    top_indices = torch.cat([old_kv_map_indices[top_indices],cache_fuse_metadata["additional_map_indices"],last_token_indices])
                     top_indices = torch.unique(top_indices)
                     top_indices,_ = torch.sort(top_indices)
                     cache_fuse_metadata["imp_indices"] = top_indices
                     
-                    last_token_indices = cache_fuse_metadata["batch_seq_start_loc"][1:]-1
+                   
                     # 假设last_token_indices的所有元素都在top_indices中
                     # 直接查找位置，不需要检查是否存在
                     positions = torch.tensor([torch.where(top_indices == idx)[0][0].item() for idx in last_token_indices], 
@@ -593,16 +596,6 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     
                     cache_fuse_metadata["prefill_atten_bias"] = attn_bias
                     attn_metadata.prefill_metadata.attn_bias=None
-        elif attn_metadata.prefill_metadata and cache_fuse_metadata["prefill_atten_bias"] is None:
-            attn_bias = torch.zeros(1,query.shape[0],key.shape[0],device=query.device,dtype=query.dtype)
-            batch_seq_start_loc = attn_metadata.seq_start_loc
-            # if batch_seq_start_loc:
-            for i in range(len(batch_seq_start_loc)-1):
-                attn_bias[0,batch_seq_start_loc[i]:batch_seq_start_loc[i+1],batch_seq_start_loc[i]:batch_seq_start_loc[i+1]] = \
-                    torch.tril(torch.ones(batch_seq_start_loc[i+1]-batch_seq_start_loc[i],batch_seq_start_loc[i+1]-batch_seq_start_loc[i],device=query.device,dtype=query.dtype))
-            cache_fuse_metadata["prefill_atten_bias"] = attn_bias
-            pass
-            
             
         cache_fuse_metadata["kv_cache_dtype"] = value.dtype
         # Jiayi: whether partial update or full update at check layer
@@ -699,8 +692,12 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 # normal attention.
                 # block tables are empty if the prompt does not have a cached
                 # prefix.
-                out = self._run_memory_efficient_xformers_forward(
-                    query, key, value, prefill_meta, attn_type=attn_type,status=status, 
+                # out = self._run_memory_efficient_xformers_forward(
+                #     query, key, value, prefill_meta, attn_type=attn_type,status=status, 
+                #     cache_fuse_metadata=cache_fuse_metadata)
+                
+                out = self._run_sdpa_forward(
+                    query, key, value, prefill_meta,status=status, 
                     cache_fuse_metadata=cache_fuse_metadata)
                 assert out.shape == output[:num_prefill_query_tokens].shape
                 output[:num_prefill_query_tokens] = out
@@ -776,6 +773,113 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
 
         # Reshape the output tensor.
         return output.view(-1, self.num_heads * self.head_size)
+
+    def _run_sdpa_forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: XFormersMetadata,
+        status,
+        cache_fuse_metadata,
+    ):
+        org_q_shape = query.shape
+        # 返回 [seq,head,dim]
+        if self.num_kv_heads != self.num_heads:
+            # GQA/MQA requires the shape [B, M, G, H, K].
+            # Note that the output also has the same shape (which is different
+            # from a spec from the doc).
+            query = query.view(query.shape[0], self.num_kv_heads,
+                               self.num_queries_per_kv, query.shape[-1])
+            key = key[:, :,
+                      None, :].expand(key.shape[0], self.num_kv_heads,
+                                      self.num_queries_per_kv, key.shape[-1])
+            value = value[:, :,
+                          None, :].expand(value.shape[0], self.num_kv_heads,
+                                          self.num_queries_per_kv,
+                                          value.shape[-1])
+        
+        query = query.unsqueeze(0)
+        key = key.unsqueeze(0)
+        value = value.unsqueeze(0)
+        query = query.reshape(query.shape[0],query.shape[1],-1,query.shape[-1]).transpose(1,2)
+        key = key.reshape(key.shape[0],key.shape[1],-1,key.shape[-1]).transpose(1,2)
+        value = value.reshape(value.shape[0],value.shape[1],-1,value.shape[-1]).transpose(1,2)
+        if status in [1,2]:
+            # k的长度
+            seq_kv_lens = attn_metadata.seq_lens
+            # 优化后的长度计算代码
+            indices = cache_fuse_metadata["selected_token_indices"]
+            seq_q_lens = torch.diff(torch.cat([torch.tensor([0], device=indices.device, dtype=indices.dtype), indices+1]))
+            out = torch.zeros_like(query)
+            start_q,start_k = 0,0
+            if status == 1 and cache_fuse_metadata["enable_compute_as"]:
+                batch_top_indices = []
+                batch_las_indices = []
+            for seq_len_q,seq_len_k in zip(seq_q_lens,seq_kv_lens):
+                end_q = start_q + seq_len_q
+                end_k = start_k + seq_len_k
+                q = query[:,:,start_q:end_q,:]
+                k = key[:,:,start_k:end_k,:]
+                v = value[:,:,start_k:end_k,:]
+                sub_out = torch.nn.functional.scaled_dot_product_attention(q,
+                                                                           k,
+                                                                           v,
+                                                                           is_causal=False,
+                                                                           dropout_p=0.0,
+                                                                           attn_mask=cache_fuse_metadata["prefill_atten_bias"][:,start_q:end_q,start_k:end_k])
+                out[:,:,start_q:end_q,:] = sub_out
+                # if status == 1 and cache_fuse_metadata["enable_compute_as"]:
+                #     atten_weight = torch.nn.functional.scaled_dot_product_attention(q,
+                #                                                                     k,
+                #                                                                    torch.ones_like(v),
+                #                                                                    is_causal=False,
+                #                                                                    dropout_p=0.0,
+                #                                                                    attn_mask=cache_fuse_metadata["prefill_atten_bias"][:,start_q:end_q,start_k:end_k])
+                #     has_token_indices = torch.topk(atten_weight,k=int(cache_fuse_metadata["has_top_ratio"]*atten_weight.shape[0])).indices
+                #     las_token_indices = torch.topk(atten_weight,k=int(cache_fuse_metadata["las_top_ratio"]*atten_weight.shape[0]),largest=False).indices
+                #     batch_top_indices.append(has_token_indices)
+                #     batch_las_indices.append(las_token_indices)
+                start_q,start_k = end_q,end_k
+            out = out.transpose(1,2)
+            # if status == 1 and cache_fuse_metadata["enable_compute_as"]:
+            #     batch_top_indices = torch.cat(batch_top_indices,dim=0)
+            #     batch_las_indices = torch.cat(batch_las_indices,dim=0)
+            #     batch_top_indices = torch.unique(batch_top_indices)
+            #     batch_las_indices = torch.unique(batch_las_indices)
+            #     batch_top_indices,_ = torch.sort(batch_top_indices)
+            #     batch_las_indices,_ = torch.sort(batch_las_indices)
+            #     cache_fuse_metadata["batch_top_indices"] = batch_top_indices
+            #     cache_fuse_metadata["batch_las_indices"] = batch_las_indices
+            # pass
+        elif status in [0]:
+            seq_lens = attn_metadata.seq_lens
+            out = torch.empty_like(query)
+            if seq_lens is not None:
+                start_q,start_k = 0,0
+                for seq_len_q,seq_len_k in zip(seq_lens,seq_lens):
+                    end_q = start_q + seq_len_q
+                    end_k = start_k + seq_len_k
+                    q = query[:,:,start_q:end_q,:]
+                    k = key[:,:,start_k:end_k,:]
+                    v = value[:,:,start_k:end_k,:]
+
+                    sub_out = torch.nn.functional.scaled_dot_product_attention(
+                        q,
+                        k,
+                        v,
+                        dropout_p=0.0,
+                        is_causal=True)
+                    # sub_out = sub_out.transpose(1,2)
+                    out[:,:,start_q:end_q,:] = sub_out
+                    start_q,start_k = end_q,end_k
+                out = out.transpose(1,2)
+            else:
+                out = torch.zeros_like(org_q_shape,dtype=query.dtype,device=query.device)
+                
+        return out.reshape(org_q_shape)
+        
+        
 
     def _run_memory_efficient_xformers_forward(
         self,
@@ -899,21 +1003,37 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 output = torch.nn.functional.scaled_dot_product_attention(query,key,value,attn_mask=cache_fuse_metadata["prefill_atten_bias"])
                 out = output.transpose(1,2)
                 pass
-            else:
-                # start_time = time.time()
-                out = xops.memory_efficient_attention_forward(
-                    query,
-                    key,
-                    value,
-                    attn_bias=attn_bias[0],
-                    p=0.0,
-                    scale=self.scale)
-                # query = query.reshape(query.shape[0],query.shape[1],-1,query.shape[-1]).transpose(1,2)
-                # key = key.reshape(key.shape[0],key.shape[1],-1,key.shape[-1]).transpose(1,2)
-                # value = value.reshape(value.shape[0],value.shape[1],-1,value.shape[-1]).transpose(1,2)
+            elif status in [0]:
+                # seq_start_loc = attn_metadata.prefill_metadata.seq_start_loc
+                seq_lens = attn_metadata.seq_lens
+                
+                query = query.reshape(query.shape[0],query.shape[1],-1,query.shape[-1]).transpose(1,2)
+                key = key.reshape(key.shape[0],key.shape[1],-1,key.shape[-1]).transpose(1,2)
+                value = value.reshape(value.shape[0],value.shape[1],-1,value.shape[-1]).transpose(1,2)
+                out = torch.empty_like(query)
+                if seq_lens is not None:
+                    start_q,start_k = 0,0
+                    for seq_len_q,seq_len_k in zip(seq_lens,seq_lens):
+                        end_q = start_q + seq_len_q
+                        end_k = start_k + seq_len_k
+                        q = query[:,:,start_q:end_q,:]
+                        k = key[:,:,start_k:end_k,:]
+                        v = value[:,:,start_k:end_k,:]
+                        
 
-                # output = torch.nn.functional.scaled_dot_product_attention(query,key,value,attn_mask=cache_fuse_metadata["prefill_atten_bias"])
-                # out = output.transpose(1,2)
+                        sub_out = torch.nn.functional.scaled_dot_product_attention(
+                            q,
+                            k,
+                            v,
+                            dropout_p=0.0,
+                            is_causal=True)
+                        # sub_out = sub_out.transpose(1,2)
+                        out[:,:,start_q:end_q,:] = sub_out
+                        start_q,start_k = end_q,end_k
+                    pass
+                    out = out.transpose(1,2)
+                else:
+                    out = torch.empty_like(original_query)
                 # end_time = time.time()
                 # print(f"xformers time: {end_time - start_time}s")
             return out.view_as(original_query)

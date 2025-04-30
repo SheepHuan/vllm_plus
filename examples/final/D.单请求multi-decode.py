@@ -40,7 +40,6 @@ def full_compute(pipeline:KVShareNewPipeline,
         batch_target_prompts,
     )
 
-    
     batch_candidate_kvcache,batch_candidate_outputs,_ = pipeline.get_kvcache_by_full_compute(
         pipeline.model,
         sampling_params,
@@ -62,8 +61,13 @@ def full_compute(pipeline:KVShareNewPipeline,
             batch_candidate_kvcache,
             tokenizer=None,
             window_size=5)
-    # pipeline.model.start_profile()
-    # with vllm.utils.cprofile_context("vllm_profile/partial_compute.prof"):
+    # 打印未复用的token
+    for i in range(len(batch_target_token_ids)):
+        # print(f"target_token_ids: {tokenizer.decode(batch_target_token_ids[i])}")
+        print(f"unreused_token_ids: {tokenizer.decode([batch_target_token_ids[i][j] for j in batch_unreused_map_indices[i] if j != -1])}")
+        print(f"reused_token_ids: {tokenizer.decode([batch_target_token_ids[i][j] for j in batch_reused_map_indices[i] if j != -1])}")
+    
+    sampling_params = SamplingParams(temperature=0.0,max_tokens=512)
     batch_pc_outputs = pipeline.partial_compute(
         pipeline.model,
         sampling_params,
@@ -72,8 +76,8 @@ def full_compute(pipeline:KVShareNewPipeline,
         batch_reused_map_indices,
         batch_unreused_map_indices,
         next_batch_request_ids,
-        enable_kvshare=False,
-        enable_cacheblend=True,
+        enable_kvshare=True,
+        enable_cacheblend=False,
         enable_only_compute_unreused=False,
         has_additional_value_error = enbale_has_token_error,
         las_additional_value_error = enbale_las_token_error,
@@ -86,11 +90,13 @@ def full_compute(pipeline:KVShareNewPipeline,
         print(f"time for first token:{(pc_output.metrics.first_token_time - gt_output.metrics.first_scheduled_time)*1000}ms")
         print(f"time for last token:{(pc_output.metrics.last_token_time - gt_output.metrics.first_scheduled_time)*1000}ms")
         print(pc_output.outputs[0].text)
+
+        print("==================="*10)
         print("******full_compute_output******")
         print(f"time for first token:{(gt_output.metrics.first_token_time - gt_output.metrics.first_scheduled_time)*1000}ms")
         print(f"time for last token:{(gt_output.metrics.last_token_time - gt_output.metrics.first_scheduled_time)*1000}ms")
-        print(gt_output.outputs[0].text)
-        print("==================="*10)
+        print(f"gt_output: {gt_output.outputs[0].text}")
+        
 if __name__ == "__main__":
     import os
     os.environ["VLLM_TORCH_PROFILER_DIR"] = "/root/code/vllm_plus/vllm_profile"
@@ -98,19 +104,15 @@ if __name__ == "__main__":
     os.environ["VLLM_USE_MODELSCOPE"] = "True"
     # os.environ["VLLM_ATTENTION_BACKEND"] = "XFORMERS"
     # model_name = "Qwen/Qwen2.5-32B-Instruct-GPTQ-Int4"
-    model_name = "Qwen/Qwen2.5-1.5B-Instruct"
+    model_name = "Qwen/Qwen2.5-7B-Instruct"
     # model_name = "LLM-Research/Meta-Llama-3.1-8B-Instruct"
     pipeline = KVShareNewPipeline(model_name,device="cuda:0")
     
     batch_target_docs = [
-        "我来自中国安徽，我的家乡是安徽芜湖，你能帮我生成一段关于我的家乡的介绍吗？",
-        "你叫什么名字，你都有那些功能？你帮我解决什么问题？",
-        "中国上海和美国纽约，哪个城市更权威？"
+        """假设我有：苹果、香蕉、橙子，桃子、柚子。这里总共有几种水果"""
     ]
     batch_candidate_docs = [
-        "我来自中国湖南，我的家乡是湖南长沙，你能帮我生成一段关于我的家乡的介绍吗？",
-        "你现在给你取名字叫做“华为小艺”，你告诉我，你都有那些功能？你帮我解决什么问题？",
-        "中国北京和美国纽约，哪个城市更权威？"
+        """假设我有：草莓、 蓝莓、西瓜、火龙果、苹果、香蕉、橙子，桃子、柚子。这里总共有几个水果"""
     ]
     
     full_compute(pipeline,
@@ -118,7 +120,3 @@ if __name__ == "__main__":
                  batch_target_docs,
                  enbale_has_token_error=False,
                  enbale_las_token_error=False)
-    # model_name = "/root/.cache/modelscope/hub/models/LLM-Research/Meta-Llama-3.1-8B-Instruct"
-    # model:CustomQwen2ForCausalLM = CustomQwen2ForCausalLM.from_pretrained(model_name,device_map="cuda",torch_dtype=torch.bfloat16).eval()
-    # tokenizer = AutoTokenizer.from_pretrained(model_name)
-    # template_text = "<|begin_of_text|><|start_header_id|>system<|end_header_id|>You are a helpful AI assistant.<|eot_id|><|start_header_id|>user<|end_header_id|>Translate the following text from Chinese to English:\n{prompt}\n<|eot_id|><|start_header_id|>assistant<|end_header_id|>"

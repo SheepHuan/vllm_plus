@@ -1,15 +1,7 @@
 import json
 import uuid
 import random
-import datasets
-# input_path = "examples/dataset/data/opus/zero_score_samples.json"
-# output_path = "examples/dataset/data/opus/benchmark_opus.json"
 
-# data = json.load(open(input_path, "r", encoding="utf-8"))
-
-
-# all_docs = data["all_translations"]
-# all_paris = data["similar_pairs"]
 
 class Context:
     def __init__(self, docs):
@@ -29,7 +21,7 @@ class Context:
 def generate_context(docs,max_num=1000):
     docs = random.sample(docs,max_num)
     contexts = []
-    for i in range(0,len(docs),6):
+    for i in range(0,len(docs),5):
         contexts.append(Context(docs[i:i+5]))
     return contexts
 
@@ -39,7 +31,7 @@ def get_data(docs,max_num=128):
     
     
     for _ in range(max_num):
-        sub_contexts = random.sample(contexts,2)
+        sub_contexts = random.sample(contexts,3)
         sub_sentences = []
         for c in sub_contexts:
             sub_sentences.append(c.get_sentence())
@@ -54,39 +46,36 @@ def get_data(docs,max_num=128):
     
     # 先保存
     for data in contexts:
-        document,summary = data.get_context()
+        input,output = data.get_context()
         save_data["candidates"][data.uid] = {
             "uid":data.uid,
-            "input":document,
-            "output":summary
+            "input":input,
+            "output":output
         }
     
     for data in new_data:
-        zh,en = data[0].get_context()
+        input,output = data[0].get_context()
         save_data["targets"].append({
             "uid":data[0].uid,
             "candidates":data[1],
-            "input":document,
-            "output":summary
+            "input":input,
+            "output":output
         })
     
     return save_data
+    
+## 从all_docs中随机不重复选择1000条数据
 
-data = datasets.load_dataset("GEM/xsum",split="test")
+## 每5个句子顺序成一个上下文，生成200个上下文。
 
-docs = []
-for item in data:
-    docs.append({
-        "document":item["document"],
-        "summary":item["target"]
-    })
-
-save_data = get_data(docs)
-json.dump(save_data,open("examples/dataset/data/xsum/benchmark_xsum.json","w",encoding="utf-8"),indent=4,ensure_ascii=False)
+## 从200个上下文中随机不重复抽取3个上下文，分别拿出一句话，组成一个新的上下文。
 
 
-
-
-
-
-
+if __name__ == "__main__":
+    input_path = "examples/dataset/data/samsum/all-mini-l6-v2_samsum_similar_docs_topk50.json"
+    data = json.load(open(input_path, "r", encoding="utf-8"))
+    all_docs = data["all_documents"]
+    all_paris = data["similar_docs"]
+    # keys,values= zip(*all_paris)
+    new_data = get_data(list(all_docs.values()))
+    json.dump(new_data,open("examples/dataset/data/samsum/benchmark_samsum_dataset.json","w",encoding="utf-8"),indent=4,ensure_ascii=False)

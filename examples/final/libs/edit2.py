@@ -246,7 +246,7 @@ class KVEditor:
         # 计算未复用的token索引
         unreused_map_indices = list(set(range(target_token_length)) - set(reused_map_indices))
         
-        return target_kvcache, reused_map_indices, unreused_map_indices,[len(unreused_map_indices)-1]
+        return target_kvcache, reused_map_indices, unreused_map_indices
     
     
     def batch_kvedit(batch_targets_token_ids, batch_sources_token_ids, source_kvcache: torch.Tensor,tokenizer=None,window_size=2):
@@ -457,53 +457,105 @@ class KVEditor:
         print_results(batch_data, batch_moves, target_kv_cache, reused_map_indices, tokenizer)
 
     @staticmethod
-    def kvedit_v2(target_token_ids, candidate_token_ids, candidate_kvcache: torch.Tensor=None,
+    def kvedit_v2(target_token_ids, candidates_token_ids_list, candidates_kvcache_list=None,
                   window_size=5,
                   tokenizer=None):
         """
-        批量应用移动操作到KV缓存
+        从多个候选文本中找出可以最大化复用的KV缓存片段
         
         Args:
-            target_token_ids: 目标文本的token序列列表，每个元素是样本的token
-            candidate_token_ids: 候选文本的token序列列表，每个元素是样本的token
-            candidate_kvcache: 候选KV缓存，shape为[layer, 2, token, head*dim]
-        首先计算得到targets_token和所有候选文本序列的差异报告。我的目标就是希望找到一个最优的候选文本序列，使得targets_token和候选文本序列的差异报告中的移动距离操作最短。
-        
+            target_token_ids: 目标文本的token序列
+            candidates_token_ids_list: 候选文本的token序列列表，每个元素是一个候选文本
+            candidates_kvcache_list: 候选KV缓存列表，与candidates_token_ids_list对应
+            window_size: 滑动窗口大小，用于控制匹配的最小长度
+            tokenizer: 分词器，用于文本解码和处理特殊标点符号
         
         Returns:
-            tuple: (target_kvcache, batch_reused_map_indices, batch_unreused_map_indices, sample_selected_token_indices)
+            tuple: (target_kvcache, reused_map_indices, unreused_map_indices)
                 - target_kvcache: 更新后的目标KV缓存
-                - batch_reused_map_indices: 所有样本中被复用的token位置索引
-                - batch_unreused_map_indices: 所有样本中未被复用的token位置索引
-                - sample_selected_token_indices: 每个样本中需要重新计算的token数量的累积和
+                - reused_map_indices: 被复用的token位置索引
+                - unreused_map_indices: 未被复用的token位置索引
         """
-        # candidates_moves = []
-        diff_report = KVEditor.find_text_differences(candidate_token_ids,target_token_ids,window_size=window_size)
-        moves = diff_report["moves"]
-        moves = sorted(moves, key=lambda x: (x["from_position"][0], x["to_position"][0]))
+        # 如果传入的候选文本是单个文本而非列表，包装成列表形式
+        if not isinstance(candidates_token_ids_list[0], list):
+            candidates_token_ids_list = [candidates_token_ids_list]
+            if candidates_kvcache_list is not None:
+                candidates_kvcache_list = [candidates_kvcache_list]
         
-        move_sequence = [[[x["from_position"][0],x["from_position"][1]],[x["to_position"][0],x["to_position"][1]]] for x in moves]
-        reused_map_indices = []
-        unreused_map_indices = []
-        target_kvcache = []
-        # for move in moves:
-        layer_num = len(candidate_kvcache)
-        kv_dim = candidate_kvcache.shape[-1]
+        # 初始化最佳匹配跟踪结构
+        best_matches = {}  # 目标位置 -> (候选索引, 候选位置, 匹配长度)
+        target_len = len(target_token_ids)
         
-        for layer_idx in range(layer_num):
-            key_cache = torch.zeros([len(target_token_ids),kv_dim],device=candidate_kvcache[layer_idx][0].device,dtype=candidate_kvcache[layer_idx][0].dtype)
-            value_cache = torch.zeros([len(target_token_ids),kv_dim],device=candidate_kvcache[layer_idx][0].device,dtype=candidate_kvcache[layer_idx][0].dtype)
-            for move in move_sequence:
-                key_cache[move[1][0]:move[1][1]+1, :] = candidate_kvcache[layer_idx,0,move[0][0]:move[0][1]+1, :]
-                value_cache[move[1][0]:move[1][1]+1, :] = candidate_kvcache[layer_idx,1,move[0][0]:move[0][1]+1, :]
-                if layer_idx == 0:
-                    reused_map_indices.extend(list(range(move[1][0],move[1][1]+1)))
-            target_kvcache.append(torch.stack([key_cache,value_cache],dim=0))
+        # 遍历所有候选文本
+        for cand_idx, cand_tokens in enumerate(candidates_token_ids_list):
+            # 获取当前候选文本与目标文本的差异报告
+            diff_report = KVEditor.find_text_differences(cand_tokens, target_token_ids, window_size=window_size)
             
-        reused_map_indices = list(set(reused_map_indices))
-        unreused_map_indices = list(set(range(len(target_token_ids))) - set(reused_map_indices))
-        # 强制最后一个token复用
-        unreused_map_indices.append(len(target_token_ids)-1)
+            # 处理当前候选文本的移动操作
+            for move in diff_report["moves"]:
+                from_pos = move["from_position"]
+                to_pos = move["to_position"]
+                match_length = to_pos[1] - to_pos[0] + 1
+                
+                # 对移动覆盖的每个目标位置，检查是否是更好的匹配
+                for i in range(to_pos[0], to_pos[1] + 1):
+                    match_start = from_pos[0] + (i - to_pos[0])
+                    if i not in best_matches or match_length > best_matches[i][2]:
+                        best_matches[i] = (cand_idx, match_start, match_length)
+        
+        # 初始化结果
+        reused_map_indices = []
+        if not best_matches:
+            # 如果没有匹配，返回空的KV缓存和全部未复用的索引
+            unreused_map_indices = list(range(target_len))
+            if candidates_kvcache_list is None or len(candidates_kvcache_list) == 0:
+                return None, [], unreused_map_indices
+            
+            # 初始化一个空的KV缓存
+            layer_num = candidates_kvcache_list[0].shape[0]
+            key_dim = candidates_kvcache_list[0][0].shape[-1]
+            device = candidates_kvcache_list[0][0].device
+            dtype = candidates_kvcache_list[0][0].dtype
+            
+            target_kvcache = []
+            for _ in range(layer_num):
+                key_cache = torch.zeros([target_len, key_dim], device=device, dtype=dtype)
+                value_cache = torch.zeros([target_len, key_dim], device=device, dtype=dtype)
+                target_kvcache.append(torch.stack([key_cache, value_cache], dim=0))
+            
+            return torch.stack(target_kvcache, dim=0), [], unreused_map_indices
+        
+        # 从每个候选KV缓存中提取最佳匹配的片段
+        if candidates_kvcache_list is not None:
+            layer_num = candidates_kvcache_list[0].shape[0]
+            key_dim = candidates_kvcache_list[0][0].shape[-1]
+            device = candidates_kvcache_list[0][0].device
+            dtype = candidates_kvcache_list[0][0].dtype
+            
+            target_kvcache = []
+            for layer_idx in range(layer_num):
+                key_cache = torch.zeros([target_len, key_dim], device=device, dtype=dtype)
+                value_cache = torch.zeros([target_len, key_dim], device=device, dtype=dtype)
+                
+                # 应用每个最佳匹配
+                for target_idx, (cand_idx, cand_idx_pos, _) in best_matches.items():
+                    key_cache[target_idx] = candidates_kvcache_list[cand_idx][layer_idx, 0, cand_idx_pos]
+                    value_cache[target_idx] = candidates_kvcache_list[cand_idx][layer_idx, 1, cand_idx_pos]
+                    
+                    if layer_idx == 0:  # 只在第一层时记录复用位置，避免重复
+                        reused_map_indices.append(target_idx)
+                
+                target_kvcache.append(torch.stack([key_cache, value_cache], dim=0))
+        else:
+            target_kvcache = None
+            # 仅记录复用位置
+            reused_map_indices = list(best_matches.keys())
+        
+        # 计算未复用的位置
+        reused_map_indices = sorted(list(set(reused_map_indices)))
+        unreused_map_indices = sorted(list(set(range(target_len)) - set(reused_map_indices)))
+        
+        # 处理标点符号和确保最后一个token重新计算
         if tokenizer is not None:
             # 定义需要去除复用的标点符号
             punctuation_tokens = ['.', ',', '!', '?', ';', ':', '\n', '。', '，', '！', '？', '；', '：']
@@ -511,34 +563,69 @@ class KVEditor:
             
             # 去除标点符号的复用
             for idx in reused_map_indices[:]:
-                if target_token_ids[idx] in punctuation_tokens:
+                if idx < len(target_token_ids) and target_token_ids[idx] in punctuation_tokens:
                     reused_map_indices.remove(idx)
-                    unreused_map_indices.append(idx)
+                    if idx not in unreused_map_indices:
+                        unreused_map_indices.append(idx)
         
-        unreused_map_indices = list(set(unreused_map_indices))
-
+        # 确保最后一个token被重新计算
+        if target_len - 1 not in unreused_map_indices:
+            unreused_map_indices.append(target_len - 1)
+            if target_len - 1 in reused_map_indices:
+                reused_map_indices.remove(target_len - 1)
+        
+        # 确保索引有序
         unreused_map_indices = sorted(list(set(unreused_map_indices)))
         reused_map_indices = sorted(list(set(reused_map_indices)))
-        return torch.stack(target_kvcache,dim=0),reused_map_indices,unreused_map_indices
         
-    def batch_kvedit_v2(batch_targets_token_ids, batch_candidates_token_ids, batch_candidates_kvcache: List[torch.Tensor]=None,
+        return (torch.stack(target_kvcache, dim=0) if target_kvcache is not None else None, 
+                reused_map_indices, 
+                unreused_map_indices)
+
+    def batch_kvedit_v2(batch_targets_token_ids, batch_candidates_token_ids_list, batch_candidates_kvcache_list=None,
                         window_size=2,
                         tokenizer=None,
                         max_move_distance=9999,padded_target_token_length=None):
+        """
+        批量处理目标文本与多个候选文本的KV缓存复用
+        
+        Args:
+            batch_targets_token_ids: 目标文本token序列的批次
+            batch_candidates_token_ids_list: 每个目标文本对应的候选文本token序列列表的批次
+            batch_candidates_kvcache_list: 每个目标文本对应的候选KV缓存列表的批次
+            window_size: 滑动窗口大小
+            tokenizer: 分词器
+            max_move_distance: 最大移动距离限制
+            padded_target_token_length: 目标token长度的填充值
+            
+        Returns:
+            tuple: (batch_target_kvcache, batch_reused_map_indices, batch_unreused_map_indices)
+        """
         batch_target_kvcache = []
         batch_reused_map_indices = []
         batch_unreused_map_indices = []
         
-        
-        for target_token_ids,candidates_token_ids,candidates_kvcache in zip(batch_targets_token_ids,batch_candidates_token_ids,batch_candidates_kvcache):
-            target_kvcache,reused_map_indices,unreused_map_indices = KVEditor.kvedit_v2(target_token_ids,
-                                                                                        candidates_token_ids,candidates_kvcache,
-                                                                                        window_size,tokenizer
-                                                                                        )
+        for batch_idx, target_token_ids in enumerate(batch_targets_token_ids):
+            # 获取当前批次项对应的候选文本和KV缓存
+            candidates_token_ids_list = batch_candidates_token_ids_list[batch_idx]
+            candidates_kvcache_list = None
+            if batch_candidates_kvcache_list is not None:
+                candidates_kvcache_list = batch_candidates_kvcache_list[batch_idx]
+            
+            # 应用优化的kvedit_v2函数
+            target_kvcache, reused_map_indices, unreused_map_indices = KVEditor.kvedit_v2(
+                target_token_ids,
+                candidates_token_ids_list,
+                candidates_kvcache_list,
+                window_size,
+                tokenizer
+            )
+            assert len(target_token_ids)== target_kvcache.shape[2]
             batch_target_kvcache.append(target_kvcache)
             batch_reused_map_indices.append(reused_map_indices)
             batch_unreused_map_indices.append(unreused_map_indices)
-        return batch_target_kvcache,batch_reused_map_indices,batch_unreused_map_indices
+            
+        return batch_target_kvcache, batch_reused_map_indices, batch_unreused_map_indices
 
 
 def test_acc():
@@ -577,10 +664,14 @@ if __name__=="__main__":
     a = "\n banana, orange, pear, pineapple, mango, strawberry, grape, apple."
     b = [
           "\n mango, mango, mango, mango, mango, mango, grape, apple.",
-   "\n mango, orange, pear, pineapple, time, time, time, time."
+          "\n mango, orange, pear, pineapple, time, time, time, time."
     ]
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
-    target_token_ids = tokenizer.encode(a)
-    candidates_token_ids = [tokenizer.encode(b1) for b1 in b]
-    report = KVEditor.kvedit_v2(target_token_ids,candidates_token_ids,window_size=4)
-    print(report)
+    a_token_ids = tokenizer.encode(a)
+    b_token_ids = [tokenizer.encode(b_item) for b_item in b]
+    b_kvcache = [torch.randn(1,2,len(b_item),128) for b_item in b_token_ids]
+    batch_target_kvcache, batch_reused_map_indices, batch_unreused_map_indices = KVEditor.kvedit_v2(a_token_ids,b_token_ids,b_kvcache)
+    # print(res)
+    for i in range(len(batch_reused_map_indices)):
+        print(tokenizer.decode(a_token_ids[batch_reused_map_indices[i]]))
+        
