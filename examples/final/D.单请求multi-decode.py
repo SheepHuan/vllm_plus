@@ -76,26 +76,26 @@ def full_compute(pipeline:KVShareNewPipeline,
         batch_reused_map_indices,
         batch_unreused_map_indices,
         next_batch_request_ids,
-        enable_kvshare=True,
-        enable_cacheblend=False,
+        enable_kvshare=False,
+        enable_cacheblend=True,
         enable_only_compute_unreused=False,
         has_additional_value_error = enbale_has_token_error,
         las_additional_value_error = enbale_las_token_error,
-        enable_compute_as=True
+        enable_compute_as=False
     )
-    # pipeline.model.stop_profile()
-    for gt_output,pc_output in zip(gt_outputs,batch_pc_outputs):
-        print("==================="*10)
-        print("******partial_compute_output******")
-        print(f"time for first token:{(pc_output.metrics.first_token_time - gt_output.metrics.first_scheduled_time)*1000}ms")
-        print(f"time for last token:{(pc_output.metrics.last_token_time - gt_output.metrics.first_scheduled_time)*1000}ms")
-        print(pc_output.outputs[0].text)
+    # # pipeline.model.stop_profile()
+    # for gt_output,pc_output in zip(gt_outputs,batch_pc_outputs):
+    #     print("==================="*10)
+    #     print("******partial_compute_output******")
+    #     print(f"time for first token:{(pc_output.metrics.first_token_time - gt_output.metrics.first_scheduled_time)*1000}ms")
+    #     print(f"time for last token:{(pc_output.metrics.last_token_time - gt_output.metrics.first_scheduled_time)*1000}ms")
+    #     print(pc_output.outputs[0].text)
 
-        print("==================="*10)
-        print("******full_compute_output******")
-        print(f"time for first token:{(gt_output.metrics.first_token_time - gt_output.metrics.first_scheduled_time)*1000}ms")
-        print(f"time for last token:{(gt_output.metrics.last_token_time - gt_output.metrics.first_scheduled_time)*1000}ms")
-        print(f"gt_output: {gt_output.outputs[0].text}")
+    #     print("==================="*10)
+    #     print("******full_compute_output******")
+    #     print(f"time for first token:{(gt_output.metrics.first_token_time - gt_output.metrics.first_scheduled_time)*1000}ms")
+    #     print(f"time for last token:{(gt_output.metrics.last_token_time - gt_output.metrics.first_scheduled_time)*1000}ms")
+    #     print(f"gt_output: {gt_output.outputs[0].text}")
         
 if __name__ == "__main__":
     import os

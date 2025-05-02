@@ -126,6 +126,9 @@ Summarize and condense the following text into a short single sentence.\n{text}<
         max_request_id = 0
         all_scores = []
         for batch_idx in tqdm(range(0,len(batch_items),batch_size), desc="批量生成缓存混合"):
+            # print(f"batch_idx: {batch_idx}")
+            # if batch_idx == 48:
+            #     pass
             batch_items_part = batch_items[batch_idx:batch_idx+batch_size]
             
             
@@ -233,7 +236,7 @@ Summarize and condense the following text into a short single sentence.\n{text}<
             temperature=0.0,
         )
         all_scores = []
-        for batch_idx in tqdm(range(0,len(batch_items),batch_size), desc="批量全量计算"):
+        for batch_idx in tqdm(range(2,len(batch_items),batch_size), desc="批量全量计算"):
             batch_items_part = batch_items[batch_idx:batch_idx+batch_size]
 
             batch_target_prompts =   [self.template.format(text=item["input"]) for item in batch_items_part]
@@ -274,11 +277,11 @@ if __name__ == "__main__":
     
     # benchmark_test.generate_kvcache(pipeline, benchmark_xsum, benchmark_xsum_with_kvcache, kvcache_path,batch_size=16)
     
-    benchmark_test.generate_full_compute(pipeline, benchmark_xsum_with_kvcache, benchmark_xsum_full_compute,batch_size=16)
+    # benchmark_test.generate_full_compute(pipeline, benchmark_xsum_with_kvcache, benchmark_xsum_full_compute,batch_size=16)
     
-    # benchmark_test.generate_with_cacheblend(
-    #     pipeline, benchmark_xsum_with_kvcache, benchmark_xsum_cacheblend, kvcache_path,batch_size=16
-    # ) 
+    benchmark_test.generate_with_cacheblend(
+        pipeline, benchmark_xsum_with_kvcache, benchmark_xsum_cacheblend, kvcache_path,batch_size=16
+    ) 
     # benchmark_test.generate_with_kvshare(
     #     pipeline, benchmark_xsum_with_kvcache, benchmark_xsum_kvshare, kvcache_path,batch_size=16
     # ) 

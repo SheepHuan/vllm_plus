@@ -243,23 +243,34 @@ class LlamaAttention(nn.Module):
             cache = cache.transpose(0,1)
             return cache
         if attn_metadata.prefill_metadata and cache_fuse_metadata["enable_compute_as"] and status==1:
+            # start_time = time.time()
             # 计算Attention Score
-            head_dim = self.num_heads*self.head_dim
+            delta_v = torch.sum(torch.abs(v-old_kv[1]) ** 2,dim=-1)
             batch_atten_score = torch.matmul(q,repeat_kv(k,self.total_num_heads//self.num_kv_heads)) / torch.sqrt(torch.tensor(self.q_size,device=q.device,dtype=q.dtype))
             atten_mask = cache_fuse_metadata["prefill_atten_bias"]
             batch_atten_score = batch_atten_score + atten_mask
             batch_atten_score = torch.softmax(batch_atten_score,dim=-1)
+            # end_time = time.time()
+            
             # 找每个请求前top 30%的下标和后30%的下标a
             batch_top_indices = []
             batch_bottom_indices = []
-            
-            for batch_idx in range(len(cache_fuse_metadata["batch_prompt_slice"])):
-                prompt_slice = cache_fuse_metadata["batch_prompt_slice"][batch_idx]
-                atten_score = batch_atten_score[prompt_slice[0]:prompt_slice[1],prompt_slice[1]-1]
-                top_indices = torch.topk(atten_score,k=int(0.5*atten_score.shape[0])).indices
-                bottom_indices = torch.topk(atten_score,k=int(0.5*atten_score.shape[0]),largest=False).indices
-                batch_top_indices.append(top_indices+prompt_slice[0])
-                batch_bottom_indices.append(bottom_indices+prompt_slice[0])
+            has_top_ratio = cache_fuse_metadata["has_top_ratio"]
+            las_top_ratio = cache_fuse_metadata["las_top_ratio"]
+            # 选择对应top_indices和bottom_indices中V值误差最高的30%
+            for batch_idx in range(len(cache_fuse_metadata["batch_seq_start_loc"])-1):
+                start_loc = cache_fuse_metadata["batch_seq_start_loc"][batch_idx]
+                end_loc = cache_fuse_metadata["batch_seq_start_loc"][batch_idx+1]
+                atten_score = batch_atten_score[start_loc:end_loc,end_loc-1] * delta_v[start_loc:end_loc]
+                # atten_score = batch_atten_score[start_loc:end_loc,end_loc-1]
+                # 使用阈值方法筛选分数超过0.1的下标
+                top_indices = torch.topk(atten_score,k=int(has_top_ratio*atten_score.shape[0])).indices
+                bottom_indices = torch.topk(atten_score,k=int(las_top_ratio*atten_score.shape[0]),largest=False).indices
+
+                batch_top_indices.append(top_indices+start_loc)
+                batch_bottom_indices.append(bottom_indices+start_loc)
+            # print(f"compute_as time: {end_time - start_time}s") 
+                
             batch_top_indices = torch.cat(batch_top_indices)
             batch_bottom_indices = torch.cat(batch_bottom_indices)
             batch_top_indices = torch.unique(batch_top_indices)
@@ -268,14 +279,14 @@ class LlamaAttention(nn.Module):
             batch_bottom_indices,_ = torch.sort(batch_bottom_indices)
             cache_fuse_metadata["has_token_indices"] = batch_top_indices
             cache_fuse_metadata["las_token_indices"] = batch_bottom_indices
-        if attn_metadata.prefill_metadata and status in [1,2]:
-            # 添加误差
-            if cache_fuse_metadata["has_additional_value_error"]:
-                random_error = torch.rand(len(cache_fuse_metadata["has_token_indices"]), device=old_kv[1].device, dtype=old_kv[1].dtype) * 4 - 2
-                old_kv[1][cache_fuse_metadata["has_token_indices"],:] = old_kv[1][cache_fuse_metadata["has_token_indices"],:] + random_error.unsqueeze(-1)
-            elif cache_fuse_metadata["las_additional_value_error"]:
-                random_error = torch.rand(len(cache_fuse_metadata["las_token_indices"]), device=old_kv[1].device, dtype=old_kv[1].dtype) * 4 - 2
-                old_kv[1][cache_fuse_metadata["las_token_indices"],:] = old_kv[1][cache_fuse_metadata["las_token_indices"],:] + random_error.unsqueeze(-1)
+        # if attn_metadata.prefill_metadata and status in [1,2]:
+        #     # 添加误差
+        #     if cache_fuse_metadata["has_additional_value_error"]:
+        #         random_error = torch.rand(len(cache_fuse_metadata["has_token_indices"]), device=old_kv[1].device, dtype=old_kv[1].dtype) * 4 - 2
+        #         old_kv[1][cache_fuse_metadata["has_token_indices"],:] = old_kv[1][cache_fuse_metadata["has_token_indices"],:] + random_error.unsqueeze(-1)
+        #     elif cache_fuse_metadata["las_additional_value_error"]:
+        #         random_error = torch.rand(len(cache_fuse_metadata["las_token_indices"]), device=old_kv[1].device, dtype=old_kv[1].dtype) * 4 - 2
+        #         old_kv[1][cache_fuse_metadata["las_token_indices"],:] = old_kv[1][cache_fuse_metadata["las_token_indices"],:] + random_error.unsqueeze(-1)
 
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata, status=status,
@@ -428,7 +439,7 @@ class LlamaModel(nn.Module):
             "collect": False,
             "collect_forward_attn": False,
             "collect_cross_attn": False,
-            "recomp_ratio":0.4,
+            "recomp_ratio":0.15,
             "kv_cache_dtype": None,
             "attn_bias": None,
             "imp_indices": None,
@@ -436,8 +447,11 @@ class LlamaModel(nn.Module):
             "selected_token_indices": [],
             
             "enable_kvshare":False,
+            "enable_kvshare_decode":False,
             "enable_cacheblend":False,
             "enable_only_compute_unreused": False,
+            "enable_epic": False,
+            "epic_size": 16,
             
             "has_additional_value_error":False,
             "las_additional_value_error":False,
@@ -448,7 +462,9 @@ class LlamaModel(nn.Module):
             "decode_atten_bias":None,
             "has_token_indices":None,
             "last_token_indices":None,
-            "batch_prompt_slice":None,
+            "batch_seq_start_loc":None,
+            "las_top_ratio":0.15,
+            "has_top_ratio":0.85,
             "fake_q":None,
             }       
         self.old_kvs = [[None,None]] * len(self.layers)  

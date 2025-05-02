@@ -230,7 +230,7 @@ class Qwen2Attention(nn.Module):
             batch_atten_score = batch_atten_score + atten_mask
             batch_atten_score = torch.softmax(batch_atten_score,dim=-1)
             end_time = time.time()
-            print(f"compute_as time: {end_time - start_time}s")
+            
             # 找每个请求前top 30%的下标和后30%的下标a
             batch_top_indices = []
             batch_bottom_indices = []
@@ -248,7 +248,7 @@ class Qwen2Attention(nn.Module):
 
                 batch_top_indices.append(top_indices+start_loc)
                 batch_bottom_indices.append(bottom_indices+start_loc)
-                
+            # print(f"compute_as time: {end_time - start_time}s") 
                 
             batch_top_indices = torch.cat(batch_top_indices)
             batch_bottom_indices = torch.cat(batch_bottom_indices)
@@ -450,6 +450,8 @@ class Qwen2Model(nn.Module):
             "enable_kvshare_decode":False,
             "enable_cacheblend":False,
             "enable_only_compute_unreused": False,
+            "enable_epic": False,
+            "epic_size": 16,
             
             "has_additional_value_error":False,
             "las_additional_value_error":False,
@@ -522,7 +524,7 @@ class Qwen2Model(nn.Module):
             else:
                 old_kv = [[None,None]]
             
-         
+            # s = time.time()
             layer = self.layers[i]
             hidden_states, residual = layer(
                 positions,
@@ -534,6 +536,9 @@ class Qwen2Model(nn.Module):
                 cache_fuse_metadata=self.cache_fuse_metadata,
                 old_kv=old_kv
             )
+            # e = time.time()
+            # if temp_status in [0,1]:
+            #     print(f"layer {i} time: {e - s}s")
             if temp_status==1:
                 positions = positions[self.cache_fuse_metadata["imp_indices"]]
 

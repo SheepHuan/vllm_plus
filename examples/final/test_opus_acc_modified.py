@@ -37,7 +37,7 @@ class OpusBenchmarkTest(BenchmarkTest):
         "Qwen/Qwen2.5-7B-Instruct": 
             """<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant. <|im_end|>\n
         <|im_start|>user\Please translate the following text into English.\n{text}\n<|im_end|>\n<|im_start|>assistant\n""",
-        "llama3":
+        "LLM-Research/Meta-Llama-3.1-8B-Instruct":
                     """<|begin_of_text|><|start_header_id|>system<|end_header_id|>You are a helpful AI assistant.<|eot_id|><|start_header_id|>user<|end_header_id|>
         Please translate the following text into English.\n{text}<|eot_id|><|start_header_id|>assistant<|end_header_id|>"""
     }
@@ -59,11 +59,12 @@ class OpusBenchmarkTest(BenchmarkTest):
     
     
 if __name__ == "__main__":
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    os.environ["CUDA_VISIBLE_DEVICES"] = "1"
     os.environ["VLLM_USE_MODELSCOPE"]="True"
 
-    model_name = "Qwen/Qwen2.5-7B-Instruct"
-    
+    # model_name = "Qwen/Qwen2.5-7B-Instruct"
+    model_name = "LLM-Research/Meta-Llama-3.1-8B-Instruct"
+    # model_name = "Qwen/Qwen2.5-32B-Instruct-GPTQ-Int4"
     benchmark_opus = "examples/dataset/data/opus/benchmark_syc_opus_dataset.json"
     kvcache_path = "examples/pipeline/kvcache/opus"
     benchmark_opus_with_kvcache = "examples/dataset/data/opus/opus_benchmark_qwen_kvcache.json"
@@ -78,13 +79,13 @@ if __name__ == "__main__":
     
     # benchmark_test.generate_full_compute(pipeline, benchmark_opus, benchmark_opus_full_compute,batch_size=16)
     
-    # benchmark_test.generate_with_cacheblend(
-    #     pipeline, benchmark_opus_with_kvcache, benchmark_opus_cacheblend, kvcache_path,batch_size=16
-    # ) 
-    benchmark_test.generate_with_kvshare(
-        pipeline, benchmark_opus_with_kvcache, benchmark_opus_kvshare, kvcache_path,batch_size=16,
-        enable_kvshare_decode=True
+    benchmark_test.generate_with_cacheblend(
+        pipeline, benchmark_opus_with_kvcache, benchmark_opus_cacheblend, kvcache_path,batch_size=16
     ) 
+    # benchmark_test.generate_with_kvshare(
+    #     pipeline, benchmark_opus_with_kvcache, benchmark_opus_kvshare, kvcache_path,batch_size=16,
+    #     enable_kvshare_decode=True
+    # ) 
     # benchmark_test.generate_with_only_compute_unreused(
     #     pipeline, benchmark_opus_with_kvcache, benchmark_opus_only_compute_unreused, kvcache_path,batch_size=16
     # ) 

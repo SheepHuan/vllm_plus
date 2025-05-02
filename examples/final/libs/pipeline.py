@@ -128,9 +128,11 @@ class KVShareNewPipeline:
                         enable_cacheblend=False,
                         enable_only_compute_unreused=False,
                         enable_compute_as=False,
+                        enable_epic=False,
                         has_additional_value_error=False,
                         las_additional_value_error=False,
                         enable_kvshare_decode=False,
+                        
                         device="cuda:0") -> List[RequestOutput]:
         from vllm.worker.model_runner import SingleRequestKVShareMetadata
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["check"] = True
@@ -143,6 +145,7 @@ class KVShareNewPipeline:
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["has_additional_value_error"] = has_additional_value_error
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["las_additional_value_error"] = las_additional_value_error
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["enable_compute_as"] = enable_compute_as
+        llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["enable_epic"] = enable_epic
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["enable_kvshare_decode"] = enable_kvshare_decode
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["prefill_atten_bias"] = None
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["selected_token_indices"] = None
