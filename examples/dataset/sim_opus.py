@@ -25,11 +25,11 @@ class Context:
         return random.choice(self.docs)
 
 
-def generate_context(docs,max_num=1000):
+def generate_context(docs,max_num=512):
     docs = random.sample(docs,max_num)
     contexts = []
-    for i in range(0,len(docs),5):
-        contexts.append(Context(docs[i:i+5]))
+    for i in range(0,len(docs),4):
+        contexts.append(Context(docs[i:i+4]))
     return contexts
 
 def get_data(docs,max_num=128):
@@ -50,7 +50,7 @@ def get_data(docs,max_num=128):
         "candidates":{},
         "targets":[]
     }
-    
+    prompt = "Please translate the following text from English to Chinese. {text}"
     # 先保存
     for data in contexts:
         zh,en = data.get_context()

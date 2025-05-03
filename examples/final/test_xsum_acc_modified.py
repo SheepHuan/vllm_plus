@@ -64,7 +64,7 @@ Summarize and condense the following text into a short single sentence.\n{text}<
         if not batch_items:
             print("没有需要处理的新数据")
             return
-        
+        print(f"{len(batch_items)}")
         sample_params = SamplingParams(
             max_tokens=1,
             temperature=0.0,
@@ -85,17 +85,19 @@ Summarize and condense the following text into a short single sentence.\n{text}<
         json.dump({
             "candidates":save_data,
             "targets":data["targets"]
-        }, open(output_path, "w"), indent=4)
+        }, open(output_path, "w"), indent=4,ensure_ascii=False)
         print(f"处理完成，已保存 {len(batch_items)} 条数据")
         
     def generate_with_partial_compute(self,pipeline:KVShareNewPipeline,input_path,output_path,kvcache_save_dir,batch_size=8,
-                                       enable_kvshare=False,
-                enable_cacheblend=False,
-                enable_only_compute_unreused=False,
-                has_additional_value_error = False,
-                las_additional_value_error = False,
-                enable_compute_as=False,
-                enable_kvshare_decode=False
+                                    enable_kvshare=False,
+                                    enable_cacheblend=False,
+                                    enable_only_compute_unreused=False,
+                                    has_additional_value_error = False,
+                                    las_additional_value_error = False,
+                                    enable_compute_as=False,
+                                    enable_kvshare_decode=False,
+                                    cacheblend_recomp_ratio=0.15,
+                                    has_top_ratio=0.15,
                                       
                                       ):
         data = json.load(open(input_path))
@@ -135,20 +137,27 @@ Summarize and condense the following text into a short single sentence.\n{text}<
             # 准备KVEDIT
             batch_candidate_token_ids = []
             batch_candidate_kvcache = []
+            batch_target_token_ids = []
+            batch_target_prompts= []
+            batch_answer = []
             for item in batch_items_part:
-                candidate_token_ids = [tokenizer.encode(candidates_kvcache[i]["input"]) for i in item["candidates"]]
-                batch_candidate_token_ids.append(candidate_token_ids)
-                batch_candidate_kvcache.append([torch.load(candidates_kvcache[i]["kvcache_path"], weights_only=True) for i in item["candidates"]])
-
+                sub_candidate_token_ids = [tokenizer.encode(candidates_kvcache[i]["input"]) for i in item["candidates"] if i in candidates_kvcache]
+                
+                sub_candidate_kvcache = [torch.load(candidates_kvcache[i]["kvcache_path"], weights_only=True) for i in item["candidates"] if i in candidates_kvcache]
+                if len(sub_candidate_token_ids)==0:
+                    continue
+                batch_candidate_token_ids.append(sub_candidate_token_ids)
+                batch_candidate_kvcache.append(sub_candidate_kvcache)
+                batch_target_prompts.append(self.template.format(text=item["input"]))
+                batch_answer.append(item["gpt_output"])
             
-            batch_target_prompts =   [self.template.format(text=item["input"]) for item in batch_items_part]
             batch_target_token_ids =  [tokenizer.encode(item) for item in batch_target_prompts]
             batch_target_kvcache,batch_reused_map_indices,batch_unreused_map_indices= KVEditor.batch_kvedit_v2(
                 batch_target_token_ids,
                 batch_candidate_token_ids,
-            batch_candidate_kvcache,
-            tokenizer=None,
-            window_size=5)
+                    batch_candidate_kvcache,
+                    tokenizer=None,
+                    window_size=5)
             # 计算复用率
             reused_rate = [len(batch_reused_map_indices[i])/len(batch_target_token_ids[i]) for i in range(len(batch_target_token_ids))]
             print(f"复用率: {reused_rate}")
@@ -170,16 +179,18 @@ Summarize and condense the following text into a short single sentence.\n{text}<
                 has_additional_value_error = has_additional_value_error,
                 las_additional_value_error = las_additional_value_error,
                 enable_compute_as=enable_compute_as,
-                enable_kvshare_decode=enable_kvshare_decode
+                enable_kvshare_decode=enable_kvshare_decode,
+                cacheblend_recomp_ratio = cacheblend_recomp_ratio,
+                has_top_ratio = has_top_ratio
             )
             max_request_id = max([int(pc_outputs.request_id) for pc_outputs in batch_pc_outputs])+1
             for sub_batch_idx,output in enumerate(batch_pc_outputs):
                 item = batch_items_part[sub_batch_idx]
                 item["partial_compute_output"] = output.outputs[0].text
-                item["score"] = self.compute_metric(item["partial_compute_output"],item["output"])
+                item["score"] = self.compute_metric(item["partial_compute_output"],batch_answer[sub_batch_idx])
                 save_data[item["uid"]] = item
                 all_scores.append(item["score"])
-        json.dump(save_data, open(output_path, "w"), indent=4)
+        json.dump(save_data, open(output_path, "w"), indent=4,ensure_ascii=False)
         print(f"enable_only_compute_unreused: {enable_only_compute_unreused}")
         print(f"enable_cacheblend: {enable_cacheblend}")
         print(f"enable_kvshare: {enable_kvshare}")
@@ -187,7 +198,7 @@ Summarize and condense the following text into a short single sentence.\n{text}<
         print(f"处理完成{len(batch_items)} 条数据, 平均: {sum(all_scores)/len(all_scores)}")
     
     
-    def generate_with_kvshare(self,pipeline:KVShareNewPipeline,input_path,output_path,kvcache_path,batch_size=8,enable_kvshare_decode=False):
+    def generate_with_kvshare(self,pipeline:KVShareNewPipeline,input_path,output_path,kvcache_path,batch_size=8,enable_kvshare_decode=False,has_top_ratio=0.15):
         self.generate_with_partial_compute(pipeline,input_path,output_path,kvcache_path,batch_size=batch_size,
                                        enable_kvshare=True,
                                        enable_kvshare_decode=enable_kvshare_decode,
@@ -195,16 +206,19 @@ Summarize and condense the following text into a short single sentence.\n{text}<
                                         enable_only_compute_unreused=False,
                                         has_additional_value_error = False,
                                         las_additional_value_error = False,
-                                        enable_compute_as=True)
+                                        enable_compute_as=True,
+                                        has_top_ratio=has_top_ratio)
     
-    def generate_with_cacheblend(self,pipeline:KVShareNewPipeline,input_path,output_path,kvcache_path,batch_size=8):
+    def generate_with_cacheblend(self,pipeline:KVShareNewPipeline,input_path,output_path,kvcache_path,batch_size=8,
+                                 cacheblend_recomp_ratio=0.15):
         self.generate_with_partial_compute(pipeline,input_path,output_path,kvcache_path,batch_size=batch_size,
                 enable_kvshare=False,
                 enable_cacheblend=True,
                 enable_only_compute_unreused=False,
                 has_additional_value_error = False,
                 las_additional_value_error = False,
-                enable_compute_as=False)
+                enable_compute_as=False,
+                cacheblend_recomp_ratio=cacheblend_recomp_ratio)
     
     def generate_with_only_compute_unreused(self,pipeline:KVShareNewPipeline,input_path,output_path,kvcache_path,batch_size=8):
         self.generate_with_partial_compute(pipeline,input_path,output_path,kvcache_path,batch_size=batch_size,
@@ -236,7 +250,7 @@ Summarize and condense the following text into a short single sentence.\n{text}<
             temperature=0.0,
         )
         all_scores = []
-        for batch_idx in tqdm(range(2,len(batch_items),batch_size), desc="批量全量计算"):
+        for batch_idx in tqdm(range(0,len(batch_items),batch_size), desc="批量全量计算"):
             batch_items_part = batch_items[batch_idx:batch_idx+batch_size]
 
             batch_target_prompts =   [self.template.format(text=item["input"]) for item in batch_items_part]
@@ -248,11 +262,11 @@ Summarize and condense the following text into a short single sentence.\n{text}<
             for sub_batch_idx,output in enumerate(batch_fc_outputs):
                 item = batch_items_part[sub_batch_idx]
                 item["full_compute_output"] = output.outputs[0].text
-                item["full_compute_score"] = self.compute_metric(item["full_compute_output"],item["output"])
+                item["full_compute_score"] = self.compute_metric(item["full_compute_output"],item["gpt_output"])
                 save_data[item["uid"]] = item
                 all_scores.append(item["full_compute_score"])
-        json.dump(save_data, open(output_path, "w"), indent=4)
-        print(f"处理完成{len(batch_items)} 条数据, FULL COMPUTE平均: {sum(all_scores)/len(all_scores)}")
+        json.dump(save_data, open(output_path, "w"), indent=4,ensure_ascii=False)
+        print(f"处理完成{len(all_scores)} 条数据, FULL COMPUTE平均: {sum(all_scores)/len(all_scores)}")
     
         
         
@@ -275,16 +289,17 @@ if __name__ == "__main__":
     pipeline = KVShareNewPipeline(model_name,device="cuda:0")
     benchmark_test = BenchmarkTest(model_name)
     
-    # benchmark_test.generate_kvcache(pipeline, benchmark_xsum, benchmark_xsum_with_kvcache, kvcache_path,batch_size=16)
+    benchmark_test.generate_kvcache(pipeline, benchmark_xsum, benchmark_xsum_with_kvcache, kvcache_path,batch_size=16)
     
     # benchmark_test.generate_full_compute(pipeline, benchmark_xsum_with_kvcache, benchmark_xsum_full_compute,batch_size=16)
     
-    benchmark_test.generate_with_cacheblend(
-        pipeline, benchmark_xsum_with_kvcache, benchmark_xsum_cacheblend, kvcache_path,batch_size=16
-    ) 
+    # benchmark_test.generate_with_cacheblend(
+    #     pipeline, benchmark_xsum_with_kvcache, benchmark_xsum_cacheblend, kvcache_path,batch_size=16
+    # ) 
     # benchmark_test.generate_with_kvshare(
-    #     pipeline, benchmark_xsum_with_kvcache, benchmark_xsum_kvshare, kvcache_path,batch_size=16
+    #     pipeline, benchmark_xsum_with_kvcache, benchmark_xsum_kvshare, kvcache_path,batch_size=16,
+    #     has_top_ratio=0.30
     # ) 
-    # benchmark_test.generate_with_only_compute_unreused(
-    #     pipeline, benchmark_xsum_with_kvcache, benchmark_xsum_only_compute_unreused, kvcache_path,batch_size=16
-    # ) 
+    benchmark_test.generate_with_only_compute_unreused(
+        pipeline, benchmark_xsum_with_kvcache, benchmark_xsum_only_compute_unreused, kvcache_path,batch_size=16
+    ) 

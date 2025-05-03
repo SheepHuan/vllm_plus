@@ -18,11 +18,11 @@ class Context:
         return random.choice(self.docs)
 
 
-def generate_context(docs,max_num=1000):
+def generate_context(docs,max_num=256):
     docs = random.sample(docs,max_num)
     contexts = []
-    for i in range(0,len(docs),5):
-        contexts.append(Context(docs[i:i+5]))
+    for i in range(0,len(docs),1):
+        contexts.append(Context(docs[i:i+1]))
     return contexts
 
 def get_data(docs,max_num=128):
@@ -31,7 +31,7 @@ def get_data(docs,max_num=128):
     
     
     for _ in range(max_num):
-        sub_contexts = random.sample(contexts,3)
+        sub_contexts = random.sample(contexts,1)
         sub_sentences = []
         for c in sub_contexts:
             sub_sentences.append(c.get_sentence())
@@ -43,14 +43,14 @@ def get_data(docs,max_num=128):
         "candidates":{},
         "targets":[]
     }
-    
+    prompt = "\nPlease summarize the above information in the shortest text possible. "
     # 先保存
     for data in contexts:
         input,output = data.get_context()
         save_data["candidates"][data.uid] = {
             "uid":data.uid,
             "input":input,
-            "output":output
+            # "output":output
         }
     
     for data in new_data:

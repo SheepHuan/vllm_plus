@@ -1840,7 +1840,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                         prefill_las_token_indices = self._kvshare_metadata.batch_kvshare_metadata[request_id].prefill_las_token_indices
                         if (len(prefill_las_token_indices) == 0):
                             continue
-                        padd_num = min(3,len(prefill_las_token_indices))
+                        padd_num = min(7,len(prefill_las_token_indices))
                         prefill_token_ids = self._kvshare_metadata.batch_kvshare_metadata[request_id].prefill_token_ids
                         prefill_tokens_slot_mapping = self._kvshare_metadata.batch_kvshare_metadata[request_id].prefill_tokens_slot_mapping
 
@@ -1848,8 +1848,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                         self._kvshare_metadata.batch_kvshare_metadata[request_id].prefill_las_token_indices = prefill_las_token_indices[padd_num:]
                         las_token_ids = prefill_token_ids[las_token_indices]
                         las_tokens_slot_mapping = prefill_tokens_slot_mapping[las_token_indices]
-                        pass
-                        
+
                         updated_input_tokens = torch.cat([updated_input_tokens,las_token_ids])
                         updated_input_positions = torch.cat([updated_input_positions,las_token_indices])
                         updated_slot_mapping = torch.cat([updated_slot_mapping,las_tokens_slot_mapping])

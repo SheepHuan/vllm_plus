@@ -210,55 +210,8 @@ class Qwen2Attention(nn.Module):
                                         cache_fuse_metadata['fake_q'],
                                         old_kv[0])    
         
-        def repeat_kv(cache,num_repeat):
-            """
-            kv_cache: [2, num_blocks, block_size * num_kv_heads * head_size]
-            num_repeat: int
-            """
-            cache = cache.reshape(cache.shape[0],self.num_kv_heads,-1)
-            cache = cache[:,:,None,:]
-            cache = cache.repeat(1,1,num_repeat,1)
-            cache = cache.reshape(cache.shape[0],-1)
-            cache = cache.transpose(0,1)
-            return cache
-        if attn_metadata.prefill_metadata and cache_fuse_metadata["enable_compute_as"] and status==1:
-            start_time = time.time()
-            # 计算Attention Score
-            delta_v = torch.sum(torch.abs(v-old_kv[1]) ** 2,dim=-1)
-            batch_atten_score = torch.matmul(q,repeat_kv(k,self.total_num_heads//self.num_kv_heads)) / torch.sqrt(torch.tensor(self.q_size,device=q.device,dtype=q.dtype))
-            atten_mask = cache_fuse_metadata["prefill_atten_bias"]
-            batch_atten_score = batch_atten_score + atten_mask
-            batch_atten_score = torch.softmax(batch_atten_score,dim=-1)
-            end_time = time.time()
-            
-            # 找每个请求前top 30%的下标和后30%的下标a
-            batch_top_indices = []
-            batch_bottom_indices = []
-            has_top_ratio = cache_fuse_metadata["has_top_ratio"]
-            las_top_ratio = cache_fuse_metadata["las_top_ratio"]
-            # 选择对应top_indices和bottom_indices中V值误差最高的30%
-            for batch_idx in range(len(cache_fuse_metadata["batch_seq_start_loc"])-1):
-                start_loc = cache_fuse_metadata["batch_seq_start_loc"][batch_idx]
-                end_loc = cache_fuse_metadata["batch_seq_start_loc"][batch_idx+1]
-                atten_score = batch_atten_score[start_loc:end_loc,end_loc-1] * delta_v[start_loc:end_loc]
-                # atten_score = batch_atten_score[start_loc:end_loc,end_loc-1]
-                # 使用阈值方法筛选分数超过0.1的下标
-                top_indices = torch.topk(atten_score,k=int(has_top_ratio*atten_score.shape[0])).indices
-                bottom_indices = torch.topk(atten_score,k=int(las_top_ratio*atten_score.shape[0]),largest=False).indices
 
-                batch_top_indices.append(top_indices+start_loc)
-                batch_bottom_indices.append(bottom_indices+start_loc)
-            # print(f"compute_as time: {end_time - start_time}s") 
-                
-            batch_top_indices = torch.cat(batch_top_indices)
-            batch_bottom_indices = torch.cat(batch_bottom_indices)
-            batch_top_indices = torch.unique(batch_top_indices)
-            batch_bottom_indices = torch.unique(batch_bottom_indices)
-            batch_top_indices,_ = torch.sort(batch_top_indices)
-            batch_bottom_indices,_ = torch.sort(batch_bottom_indices)
-            cache_fuse_metadata["has_token_indices"] = batch_top_indices
-            cache_fuse_metadata["las_token_indices"] = batch_bottom_indices
-        
+
         # if attn_metadata.prefill_metadata and status in [1,2]:
         #     # 添加误差
         #     if cache_fuse_metadata["has_additional_value_error"]:
@@ -463,8 +416,8 @@ class Qwen2Model(nn.Module):
             "has_token_indices":None,
             "last_token_indices":None,
             "batch_seq_start_loc":None,
-            "las_top_ratio":0.15,
-            "has_top_ratio":0.85,
+            "las_top_ratio":0.85,
+            "has_top_ratio":0.15,
             "fake_q":None,
             }     
         self.old_kvs = [[None,None]] * len(self.layers)  

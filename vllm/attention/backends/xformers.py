@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Type
 import time
+import math
 import torch
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import (AttentionBias,
@@ -533,11 +534,69 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     for idx,index in enumerate(top_indices):
                         for i in range(len(cache_fuse_metadata["batch_seq_start_loc"])-1):
                             if index >= cache_fuse_metadata["batch_seq_start_loc"][i] and index < cache_fuse_metadata["batch_seq_start_loc"][i+1]:
-                                attn_bias[:,idx,cache_fuse_metadata["batch_seq_start_loc"][i]:index+1] = 1
+                                # attn_bias[:,idx,cache_fuse_metadata["batch_seq_start_loc"][i]:index+1] = 1
+                                attn_bias[:,idx,:index+1] = 1
                     
                     cache_fuse_metadata["prefill_atten_bias"] = attn_bias
                     attn_metadata.prefill_metadata.attn_bias=None
                 elif cache_fuse_metadata["enable_kvshare"]:
+                    def repeat_kv(cache,num_repeat):
+                        """
+                        kv_cache: [2, num_blocks, block_size * num_kv_heads * head_size]
+                        num_repeat: int
+                        """
+                        cache = cache.reshape(cache.shape[0],self.num_kv_heads,-1)
+                        cache = cache[:,:,None,:]
+                        cache = cache.repeat(1,1,num_repeat,1)
+                        cache = cache.reshape(cache.shape[0],-1)
+                        cache = cache.transpose(0,1)
+                        return cache
+                    old_kv_map_indices =torch.sort(cache_fuse_metadata["old_kv_map_indices"])[0]
+                    additional_map_indices = cache_fuse_metadata["additional_map_indices"]
+                    delta_v = torch.sum(torch.abs(value.reshape(-1,self.num_kv_heads*self.head_size)-old_kv[1]),dim=-1)
+                    last_token_indices = cache_fuse_metadata["batch_seq_start_loc"][1:]-1
+                    # attn_bias = torch.zeros(1,len(last_token_indices),len(old_kv_map_indices),device=query.device,dtype=torch.bool)
+                    
+                    batch_top_indices = []
+                    batch_bottom_indices = []
+                    # 处理子序列，每个序列是一个独立的请求
+                    for idx,start_loc in enumerate(cache_fuse_metadata["batch_seq_start_loc"][:-1]):
+                        end_loc= last_token_indices[idx]+1
+                        sub_reused_position = torch.where(torch.logical_and(old_kv_map_indices>=start_loc,old_kv_map_indices<=end_loc))[0]
+                        sub_unreused_position = torch.where(torch.logical_and(additional_map_indices>=start_loc,additional_map_indices<=end_loc))[0]
+                        
+                        # 计算子序列的注意力得分
+                        sub_atten_score = torch.softmax(torch.matmul(
+                            query[sub_unreused_position,:,:].reshape(-1,self.num_heads,self.head_size).transpose(0,1)
+                            ,repeat_kv(key[sub_reused_position,...],self.num_heads//self.num_kv_heads).reshape(self.num_heads,self.head_size,-1)\
+                            /math.sqrt(
+                            self.head_size
+                        )),dim=-1).mean(dim=0)
+                        
+                        pass
+                        
+                        # 计算重要性
+                        importance_score = sub_atten_score * delta_v[sub_reused_position]
+                        # importance_score = sub_atten_score[sub_reused_position-start_loc]
+                        importance_score = importance_score[0]
+                        topk_num = max(1,int(cache_fuse_metadata["has_top_ratio"]*len(sub_reused_position)))
+                        bottomk_num = max(1,int(cache_fuse_metadata["las_top_ratio"]*len(sub_reused_position)))
+                        
+                        topk_indices = torch.topk(importance_score,k=topk_num).indices
+                        bottomk_indices = torch.topk(importance_score,k=bottomk_num,largest=False).indices
+                        # 
+                        topk_indices = [sub_reused_position[idx].item() for idx in topk_indices if  importance_score[idx] > 1e-8]
+                        bottomk_indices = [sub_reused_position[idx].item() for idx in bottomk_indices if  importance_score[idx] > 1e-8]
+                        batch_top_indices.extend(topk_indices)
+                        batch_bottom_indices.extend(bottomk_indices)
+                        
+                        
+                        
+                    batch_top_indices = torch.tensor(batch_top_indices,device=query.device,dtype=torch.long)
+                    batch_bottom_indices = torch.tensor(batch_bottom_indices,device=query.device,dtype=torch.long)
+                    cache_fuse_metadata["has_token_indices"] = batch_top_indices
+                    cache_fuse_metadata["las_token_indices"] = batch_bottom_indices
+                    
                     top_indices = torch.cat([cache_fuse_metadata["additional_map_indices"],cache_fuse_metadata["has_token_indices"],cache_fuse_metadata["batch_seq_start_loc"][1:]-1])
                     top_indices = torch.unique(top_indices)
                     top_indices,_ = torch.sort(top_indices)
@@ -822,17 +881,17 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 q = query[:,:,start_q:end_q,:]
                 k = key[:,:,start_k:end_k,:]
                 v = value[:,:,start_k:end_k,:]
-                attn_mask = None
-                if "prefill_atten_bias" in cache_fuse_metadata:
-                    attn_mask = cache_fuse_metadata["prefill_atten_bias"][:,start_q:end_q,start_k:end_k]
-                    # 确保attn_mask是连续内存
-                    attn_mask = attn_mask.contiguous()
-                    if attn_mask.shape[-1] == 1253:
-                        pass
+                # attn_mask = None
+                # if "prefill_atten_bias" in cache_fuse_metadata:
+                #     attn_mask = cache_fuse_metadata["prefill_atten_bias"][:,start_q:end_q,start_k:end_k]
+                #     # 确保attn_mask是连续内存
+                #     attn_mask = attn_mask.contiguous()
+                    # if attn_mask.shape[-1] == 1253:
+                    #     pass
                     # print(f"attn_mask shape: {attn_mask.shape}")
-                q = q.contiguous()
-                k = k.contiguous()
-                v = v.contiguous()
+                # q = q.contiguous()
+                # k = k.contiguous()
+                # v = v.contiguous()
                 # assert q.shape == k.shape == v.shape == attn_mask.shape
                 out[:,:,start_q:end_q,:] = torch.nn.functional.scaled_dot_product_attention(
                     q,
@@ -840,7 +899,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     v,
                     is_causal=False,
                     dropout_p=0.0,
-                    attn_mask=attn_mask
+                    attn_mask=cache_fuse_metadata["prefill_atten_bias"][:,start_q:end_q,start_k:end_k]
                 )
                 start_q,start_k = end_q,end_k
             out = out.transpose(1,2)

@@ -132,12 +132,13 @@ class KVShareNewPipeline:
                         has_additional_value_error=False,
                         las_additional_value_error=False,
                         enable_kvshare_decode=False,
-                        
+                        cacheblend_recomp_ratio=0.15,
+                        has_top_ratio=0.15,
                         device="cuda:0") -> List[RequestOutput]:
         from vllm.worker.model_runner import SingleRequestKVShareMetadata
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["check"] = True
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata['collect'] = False
-        llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["recomp_ratio"] = 0.0
+        llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["recomp_ratio"] = cacheblend_recomp_ratio
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["use_additional_indices"] = True
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["enable_kvshare"] = enable_kvshare
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["enable_cacheblend"] = enable_cacheblend
@@ -150,6 +151,8 @@ class KVShareNewPipeline:
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["prefill_atten_bias"] = None
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["selected_token_indices"] = None
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["batch_seq_start_loc"] = None
+        llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["las_top_ratio"] = 1-has_top_ratio
+        llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["has_top_ratio"] = has_top_ratio
 
         llm_model.llm_engine.model_executor.driver_worker.model_runner._kvshare_metadata.is_partial_compute = True
         

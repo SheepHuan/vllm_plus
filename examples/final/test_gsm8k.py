@@ -33,7 +33,7 @@ class SAMSumBenchmarkTest(BenchmarkTest):
     TEMPLATE ={
         "Qwen/Qwen2.5-1.5B-Instruct":
             """<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant. <|im_end|>\n
-        <|im_start|>user\n{text}\n<|im_end|>\n<|im_start|>assistant\n""",
+        <|im_start|>user\nPlease summarize the following information in the shortest text possible. \n{text}\n<|im_end|>\n<|im_start|>assistant\n""",
         "Qwen/Qwen2.5-7B-Instruct": 
             """<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant. <|im_end|>\n
         <|im_start|>user\nPlease summarize the following information in the shortest text possible. \n{text}\n<|im_end|>\n<|im_start|>assistant\n""",

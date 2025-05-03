@@ -556,23 +556,24 @@ class KVEditor:
         unreused_map_indices = sorted(list(set(range(target_len)) - set(reused_map_indices)))
         
         # 处理标点符号和确保最后一个token重新计算
-        if tokenizer is not None:
-            # 定义需要去除复用的标点符号
-            punctuation_tokens = ['.', ',', '!', '?', ';', ':', '\n', '。', '，', '！', '？', '；', '：']
-            punctuation_tokens = [tokenizer.encode(t)[0] for t in punctuation_tokens]
+        # if tokenizer is not None:
+        #     # 定义需要去除复用的标点符号
+        #     punctuation_tokens = ['.', ',', '!', '?', ';', ':', '\n', '。', '，', '！', '？', '；', '：']
+        #     punctuation_tokens = [tokenizer.encode(t)[0] for t in punctuation_tokens]
             
-            # 去除标点符号的复用
-            for idx in reused_map_indices[:]:
-                if idx < len(target_token_ids) and target_token_ids[idx] in punctuation_tokens:
-                    reused_map_indices.remove(idx)
-                    if idx not in unreused_map_indices:
-                        unreused_map_indices.append(idx)
+        #     # 去除标点符号的复用
+        #     for idx in reused_map_indices[:]:
+        #         if idx < len(target_token_ids) and target_token_ids[idx] in punctuation_tokens:
+        #             reused_map_indices.remove(idx)
+        #             if idx not in unreused_map_indices:
+        #                 unreused_map_indices.append(idx)
         
-        # 确保最后一个token被重新计算
-        if target_len - 1 not in unreused_map_indices:
-            unreused_map_indices.append(target_len - 1)
-            if target_len - 1 in reused_map_indices:
-                reused_map_indices.remove(target_len - 1)
+        # 确保最后3个token被重新计算
+        last_tokens_indices = [target_len-1,target_len-2,target_len-3]
+        unreused_map_indices = list(set(unreused_map_indices+last_tokens_indices))
+        for idx in last_tokens_indices:
+            if idx in reused_map_indices:
+                reused_map_indices.remove(idx)
         
         # 确保索引有序
         unreused_map_indices = sorted(list(set(unreused_map_indices)))
