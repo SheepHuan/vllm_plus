@@ -76,8 +76,8 @@ def full_compute(pipeline:KVShareNewPipeline,
         batch_reused_map_indices,
         batch_unreused_map_indices,
         next_batch_request_ids,
-        enable_kvshare=False,
-        enable_cacheblend=True,
+        enable_kvshare=True,
+        enable_cacheblend=False,
         enable_only_compute_unreused=False,
         has_additional_value_error = enbale_has_token_error,
         las_additional_value_error = enbale_las_token_error,
@@ -122,13 +122,12 @@ if __name__ == "__main__":
     # ]
     
   
-    target_doc = ["As one of the most successful shows on U.S. television history, American Idol has a strong impact not just on television, but also in the wider world of entertainment. It helped create a number of highly successful recording artists, such as Kelly Clarkson, Daughtry and Carrie Underwood, as well as others of varying notability.\n\n\"Already Gone\" is a song performed by American pop singer-songwriter Kelly Clarkson from her fourth studio album, \"All I Ever Wanted\". It is co-written by Clarkson and Ryan Tedder, who also produced it. The song was released as the album's third single in August 2009. What show helped launch the career of the performer who wrote the lyrics to Already Gone?"
+    target_doc = ["Rachel bought 23 cookies and Janet gave her 42 cookies. The other day her brother ate 44 of those cookies. How many cookies are left for Rachel?"
     ]
     candidates =[[
-            "\nAs one of the most successful shows on U.S. television history, American Idol has a strong impact not just on television, but also in the wider world of entertainment.\n",
-            "\nIt helped create a number of highly successful recording artists, such as Kelly Clarkson, Daughtry and Carrie Underwood, as well as others of varying notability.\n",
-            "\"Already Gone\" is a song performed by American pop singer-songwriter Kelly Clarkson from her fourth studio album, \"All I Ever Wanted\". It is co-written by Clarkson and Ryan Tedder, who also produced it. ",
-            "\nThe song was released as the album's third single in August 2229. \n",
+        "\n\n\nRachel bought 17 cookies and Janet gave her 36 cookies.",
+        "\n\n\nThe other day her brother ate 29 of those cookies.",
+        "\n\n\nHow many cookies are left for Rachel?"
         ]
     ]
     

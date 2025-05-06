@@ -92,7 +92,7 @@ Summarize and condense the following text into a short single sentence.\n{text}<
                                     has_top_ratio=0.15,
                                       
                                       ):
-        data = json.load(open(input_path))
+        data = json.load(open(input_path))[:128]
        
         save_data = []
         os.makedirs(kvcache_save_dir,exist_ok=True)
@@ -221,7 +221,7 @@ Summarize and condense the following text into a short single sentence.\n{text}<
         
     def generate_full_compute(self,pipeline:KVShareNewPipeline,input_path,output_path,batch_size=8):
         
-        data = json.load(open(input_path))
+        data = json.load(open(input_path))[:128]
        
         save_data = []
 

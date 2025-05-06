@@ -73,6 +73,8 @@ def process_item(item):
 from transformers import AutoTokenizer
 import random
 
+import spacy
+
 def random_split_chunks(text: str, chunk_size: int) -> list:
     """
     双层分块函数：先按固定token数分块，再随机拆分成两个子块
@@ -85,30 +87,13 @@ def random_split_chunks(text: str, chunk_size: int) -> list:
     返回：
     List[str] 分块后的文本列表
     """
-    # 第一阶段：按N个token分块
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
-    tokens = tokenizer.encode(text)
-    primary_chunks = [tokens[i:i+chunk_size] for i in range(0, len(tokens), chunk_size)]
-    
-    # 第二阶段：每个块随机拆分
-    final_chunks = []
-    for chunk in primary_chunks:
-        if len(chunk) <= chunk_size //2:  # 处理极小块
-            final_chunks.append(tokenizer.decode(chunk))
-            continue
-            
-        # 随机选择拆分点（网页1、网页7策略结合）
-        s = 0
-        e = len(chunk)
-        split_start_point = random.randint(s+1,e//2)
-        split_end_point = split_start_point + len(chunk) //2
-        
-        # 生成子块（网页4的token转换策略）
-        front = tokenizer.decode(chunk[split_start_point:split_end_point])
-        back = tokenizer.decode(chunk[s:split_start_point]+chunk[split_end_point:e])
-        final_chunks.extend([front, back])
-    
-    return final_chunks
+    # 第一阶段：按N个token分块\
+    nlp = spacy.load('en_core_web_sm')  # 加载中文模型
+    doc = nlp(text)
+    sentences = [sent.text for sent in doc.sents]
+    return sentences
+
+
 
 def chunk_data(data,chunk_size=96):
     for item in data:
@@ -117,12 +102,12 @@ def chunk_data(data,chunk_size=96):
     return data
 
 if __name__ == "__main__":
-    load_samsum()
+    # load_samsum()
     # data = json.load(open("examples/dataset/data/samsum/sim_samsum_benchmark_dataset.json","r",encoding="utf-8"))
     # with multiprocessing.Pool(processes=16) as pool:
     #     data = list(tqdm(pool.imap(process_item, data), total=len(data)))
-    # json.dump(data,open("examples/dataset/data/samsum/sim_samsum_benchmark_dataset.json","w"),indent=4,ensure_ascii=False)
+    # json.dump(data,open("examples/dataset/data/samsum/sim_samsum_benchmark_dataset_gpt.json","w"),indent=4,ensure_ascii=False)
 
-    data = json.load(open("examples/dataset/data/samsum/sim_samsum_benchmark_dataset.json","r",encoding="utf-8"))
+    data = json.load(open("examples/dataset/data/samsum/sim_samsum_benchmark_dataset_gpt.json","r",encoding="utf-8"))
     data = chunk_data(data,chunk_size=128)
     json.dump(data,open("examples/dataset/data/samsum/sim_samsum_benchmark_dataset_chunk.json","w"),indent=4,ensure_ascii=False)

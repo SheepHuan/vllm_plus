@@ -225,12 +225,12 @@ class LlamaAttention(nn.Module):
                 # NOTE VLLM在批处理的时候可能会循环调用这个
                 
                 self.hack_kv = [k.clone(), v.clone()]
-            if status in [1,2]:
-                if cache_fuse_metadata["fake_q"] is None:
-                    cache_fuse_metadata['fake_q'] = torch.rand_like(q)
-                _, old_kv[0] = self.rotary_emb(cache_fuse_metadata['org_pos'],
-                                            cache_fuse_metadata['fake_q'],
-                                            old_kv[0])
+        if status in [1,2]:
+            if cache_fuse_metadata["fake_q"] is None:
+                cache_fuse_metadata['fake_q'] = torch.rand_like(q)
+            _, old_kv[0] = self.rotary_emb(cache_fuse_metadata['org_pos'],
+                                        cache_fuse_metadata['fake_q'],
+                                        old_kv[0])
       
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata, status=status,

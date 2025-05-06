@@ -87,7 +87,7 @@ def process_item(item):
 def chunk_data(data,chunk_size=96):
     for item in data:
         chunk_tokens = random_split_chunks(item["candidate_doc"],chunk_size)
-        item["candidates"] = ["\n\n\n"+chunk for chunk in chunk_tokens]
+        item["candidates"] = ["\n "+chunk for chunk in chunk_tokens]
     return data
 
 
@@ -95,7 +95,7 @@ if __name__ == "__main__":
     save_path = "examples/dataset/data/gsm8k/sim_gsm8k_benchmark_dataset.json"
     gpt_save_path ="examples/dataset/data/gsm8k/benchmark_gsm8k_gpt.json"
     gpt_save_chunk_path ="examples/dataset/data/gsm8k/sim_gsm8k_benchmark_dataset_chunk.json"
-    # load_gsm8k_data(save_path=save_path,max_num=512)
+    # load_gsm8k_data(save_path=save_path,max_num=128)
     
     
     # data = json.load(open(save_path,"r"))

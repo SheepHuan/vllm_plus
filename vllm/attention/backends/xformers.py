@@ -582,11 +582,12 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                         topk_num = max(1,int(cache_fuse_metadata["has_top_ratio"]*len(sub_reused_position)))
                         bottomk_num = max(1,int(cache_fuse_metadata["las_top_ratio"]*len(sub_reused_position)))
                         
+                        # 先按importance_score排序，如果importance_score小于1e-6，则按照delta_v排序
                         topk_indices = torch.topk(importance_score,k=topk_num).indices
                         bottomk_indices = torch.topk(importance_score,k=bottomk_num,largest=False).indices
                         # 
-                        topk_indices = [sub_reused_position[idx].item() for idx in topk_indices if  importance_score[idx] > 1e-8]
-                        bottomk_indices = [sub_reused_position[idx].item() for idx in bottomk_indices if  importance_score[idx] > 1e-8]
+                        topk_indices = [sub_reused_position[idx].item() for idx in topk_indices]
+                        bottomk_indices = [sub_reused_position[idx].item() for idx in bottomk_indices]
                         batch_top_indices.extend(topk_indices)
                         batch_bottom_indices.extend(bottomk_indices)
                         
