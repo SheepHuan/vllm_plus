@@ -572,13 +572,13 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                             /math.sqrt(
                             self.head_size
                         )),dim=-1).mean(dim=0)
-                        
-                        pass
+                        sub_atten_score = torch.sum(sub_atten_score,dim=0)
+                        # pass
                         
                         # 计算重要性
                         importance_score = sub_atten_score * delta_v[sub_reused_position]
                         # importance_score = sub_atten_score[sub_reused_position-start_loc]
-                        importance_score = importance_score[0]
+                        # importance_score = importance_score
                         topk_num = max(1,int(cache_fuse_metadata["has_top_ratio"]*len(sub_reused_position)))
                         bottomk_num = max(1,int(cache_fuse_metadata["las_top_ratio"]*len(sub_reused_position)))
                         

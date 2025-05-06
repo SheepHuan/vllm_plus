@@ -22,7 +22,13 @@ def gsm8k_candidate_generate(text):
     messages=[
         {
             "role": "user",
-            "content": f"Please replace the names of people, numbers in the following text I input. Return the fully replaced text to me.  {text}",
+            "content": f""""
+            1. Please modify and replace the names of the main characters in the text I input. For example, change Lisa to LiasABC, change Peter to PeterDFS. You need change all the names in text.
+            2. Expand and modify the numbers that appear in the text. For instance, change 1 to 11, 13 to 133, and 4 to 554. 
+            3. Also modify the time that appears in the text. For example, change 7:00 to 18:00. 
+            You can use your own discretion when modifying the numbers and time. 
+            \nText: {text} \n Just give me the modified text.
+            """,
         }
     ],
     model="gpt-4.1-mini",    #  替换成你先想用的模型全称， 模型全称可以在DMXAPI 模型价格页面找到并复制。
@@ -41,7 +47,7 @@ if __name__ == "__main__":
     # targets = data["targets"]
     
     # 使用多进程处理
-    num_processes = min(16, len(data))
+    num_processes = min(128, len(data))
     with multiprocessing.Pool(processes=num_processes) as pool:
         gpt_data = pool.map(process_item, data)
     

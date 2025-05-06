@@ -218,6 +218,6 @@ if __name__ == "__main__":
     config = "en-zh"
     dataset_path = f"examples/dataset/data/opus/opus_dataset_{config}.json"
     save_path = f"examples/dataset/data/opus/opus_dataset_{config}_similar_docs_250403.json"
-    #process_opus_dataset(save_path,config)
+    process_opus_dataset(save_path,config)
     #embed_opus_dataset(dataset_path: str, config: str, batch_size: int = 32)
-    find_opus_similar_docs(dataset_path=dataset_path, save_path=save_path, config=config)
+    # find_opus_similar_docs(dataset_path=dataset_path, save_path=save_path, config=config)

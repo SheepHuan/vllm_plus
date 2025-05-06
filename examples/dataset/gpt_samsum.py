@@ -9,10 +9,7 @@ client = OpenAI(
 )
 
 
-
-# print(chat_completion)
-
-def samsum_answer(text):
+def samsum_candidate_generate(text):
     # 创建新的客户端实例，避免多进程共享问题
     local_client = OpenAI(
         api_key="sk-PMl5s5V78VDlTQoRhledqZ41fJIWJKTgjprIkYZrg7TxdvWK",
@@ -22,35 +19,42 @@ def samsum_answer(text):
     messages=[
         {
             "role": "user",
-            "content": f"Please replace the names of people, numbers in the following text I input. Return the fully replaced text to me.  {text}",
+             "content": f""""
+            1. Please modify and replace the names of the main characters in the text I input. For example, change Lisa to LiasABC, change Peter to PeterDFS. You need change all the names in text.
+            2. Expand and modify the numbers that appear in the text. For instance, change 1 to 11, 13 to 133, and 4 to 554. 
+            3. Also modify the time that appears in the text. For example, change 7:00 to 18:00. 
+            You can use your own discretion when modifying the numbers and time. 
+            \nText: {text} \n Just give me the modified text.
+            """,
         }
     ],
     model="gpt-4.1-mini",    #  替换成你先想用的模型全称， 模型全称可以在DMXAPI 模型价格页面找到并复制。
     )
     return chat_completion.choices[0].message.content
 
-
+def process_item(item):
+    input_text = item["target_doc"]
+    output = samsum_candidate_generate(input_text)
+    item["gpt_candidate_doc"] = output
+    return item
 
 if __name__ == "__main__":
     
-    data = json.load(open("examples/dataset/data/samsum/benchmark_samsum_dataset.json", "r"))
-    candidates = data["candidates"]
+    data = json.load(open("examples/dataset/data/samsum/sim_samsum_benchmark_dataset.json", "r"))
+    # candidates = data["candidates"]
     
     # 使用多进程处理
     # num_processes = min(1, len(targets))
     # with multiprocessing.Pool(processes=num_processes) as pool:
     #     gpt_data = pool.map(process_item, targets)
-    gpt_candidates = {}
-    for idx,(key,value) in enumerate(candidates.items()):
-        if idx > 4:
-            break
-        gpt_input = samsum_answer(value["input"])
-        gpt_candidates[key] = {
-            "uid":key,
-            "input":gpt_input,
-        }
+    # gpt_candidates = []
+    # for idx,item in enumerate(data):
+        
+    #     item["candidate_doc_gpt"] = samsum_answer(item["target_doc"])
+    #     gpt_candidates.append(item)
+        
+    num_processes = min(64, len(data))
+    with multiprocessing.Pool(processes=num_processes) as pool:
+        gpt_data = pool.map(process_item, data)
     
-    json.dump({
-        "candidates": gpt_candidates,
-        "targets": data["targets"],
-    }, open("examples/dataset/data/samsum/benchmark_samsum_dataset_gpt.json", "w"), indent=4, ensure_ascii=False)
+    json.dump(gpt_data, open("examples/dataset/data/samsum/benchmark_samsum_dataset_gpt.json", "w"), indent=4, ensure_ascii=False)

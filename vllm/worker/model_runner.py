@@ -1840,7 +1840,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                         prefill_las_token_indices = self._kvshare_metadata.batch_kvshare_metadata[request_id].prefill_las_token_indices
                         if (len(prefill_las_token_indices) == 0):
                             continue
-                        padd_num = min(7,len(prefill_las_token_indices))
+                        padd_num = min(3,len(prefill_las_token_indices))
                         prefill_token_ids = self._kvshare_metadata.batch_kvshare_metadata[request_id].prefill_token_ids
                         prefill_tokens_slot_mapping = self._kvshare_metadata.batch_kvshare_metadata[request_id].prefill_tokens_slot_mapping
 
@@ -1952,7 +1952,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             return hidden_or_intermediate_states
 
         if self._kvshare_metadata.is_partial_compute and model_input.attn_metadata.prefill_metadata \
-            and self.model.model.cache_fuse_metadata['enable_compute_as']:
+            and self.model.model.cache_fuse_metadata['enable_kvshare'] and self.model.model.cache_fuse_metadata['enable_kvshare_decode']:
             batch_has_token_indices = self.model.model.cache_fuse_metadata['has_token_indices']
             batch_las_token_indices = self.model.model.cache_fuse_metadata['las_token_indices']
             # 将batch_has_token_indices和batch_las_token_indices根据seq_start_loc进行切分到对应的request id上
