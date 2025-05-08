@@ -132,6 +132,7 @@ class KVShareNewPipeline:
                         has_additional_value_error=False,
                         las_additional_value_error=False,
                         enable_kvshare_decode=False,
+                        enable_cacheblend_decode=False,
                         cacheblend_recomp_ratio=0.15,
                         has_top_ratio=0.15,
                         device="cuda:0") -> List[RequestOutput]:
@@ -154,6 +155,7 @@ class KVShareNewPipeline:
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["las_top_ratio"] = 1-has_top_ratio
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["has_top_ratio"] = has_top_ratio
         llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["check_layers"] = [1]
+        llm_model.llm_engine.model_executor.driver_worker.model_runner.model.model.cache_fuse_metadata["enable_cacheblend_decode"] = enable_cacheblend_decode
         llm_model.llm_engine.model_executor.driver_worker.model_runner._kvshare_metadata.is_partial_compute = True
         
         for idx,request_id in enumerate(next_batch_request_ids):

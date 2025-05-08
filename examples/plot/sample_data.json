@@ -1,0 +1,80 @@
+{
+    "Mistral-7B": {
+        "2WikiMOA": {
+            "CacheBlend": [0.3, 0.28],
+            "Full KV reuse": [0.15, 0.1],
+            "Prefix Caching": [0.5, 0.3],
+            "Full KV recompute": [0.6, 0.32]
+        },
+        "Musique": {
+            "CacheBlend": [0.3, 0.28],
+            "Full KV reuse": [0.15, 0.17],
+            "Prefix Caching": [0.5, 0.3],
+            "Full KV recompute": [0.6, 0.32]
+        },
+        "SAMSum": {
+            "CacheBlend": [0.3, 0.38],
+            "Full KV reuse": [0.25, 0.19],
+            "Prefix Caching": [0.6, 0.38],
+            "Full KV recompute": [0.6, 0.39]
+        },
+        "MultiNews": {
+            "CacheBlend": [0.3, 0.18],
+            "Full KV reuse": [0.25, 0.14],
+            "Prefix Caching": [0.5, 0.18],
+            "Full KV recompute": [0.52, 0.19]
+        }
+    },
+    "Yi-34B": {
+        "2WikiMOA": {
+            "CacheBlend": [0.7, 0.35],
+            "Full KV reuse": [0.3, 0.17],
+            "Prefix Caching": [2.0, 0.37],
+            "Full KV recompute": [2.1, 0.38]
+        },
+        "Musique": {
+            "CacheBlend": [0.7, 0.35],
+            "Full KV reuse": [0.3, 0.18],
+            "Prefix Caching": [2.0, 0.37],
+            "Full KV recompute": [2.1, 0.38]
+        },
+        "SAMSum": {
+            "CacheBlend": [0.7, 0.38],
+            "Full KV reuse": [0.3, 0.14],
+            "Prefix Caching": [2.0, 0.38],
+            "Full KV recompute": [2.1, 0.39]
+        },
+        "MultiNews": {
+            "CacheBlend": [0.7, 0.17],
+            "Full KV reuse": [0.3, 0.12],
+            "Prefix Caching": [2.0, 0.18],
+            "Full KV recompute": [2.1, 0.19]
+        }
+    },
+    "Llama-70B": {
+        "2WikiMOA": {
+            "CacheBlend": [1.0, 0.35],
+            "Full KV reuse": [0.5, 0.19],
+            "Prefix Caching": [2.5, 0.37],
+            "Full KV recompute": [2.8, 0.38]
+        },
+        "Musique": {
+            "CacheBlend": [1.0, 0.32],
+            "Full KV reuse": [0.5, 0.14],
+            "Prefix Caching": [2.5, 0.32],
+            "Full KV recompute": [2.8, 0.33]
+        },
+        "SAMSum": {
+            "CacheBlend": [1.0, 0.38],
+            "Full KV reuse": [0.5, 0.19],
+            "Prefix Caching": [2.8, 0.38],
+            "Full KV recompute": [2.85, 0.39]
+        },
+        "MultiNews": {
+            "CacheBlend": [1.0, 0.19],
+            "Full KV reuse": [0.5, 0.07],
+            "Prefix Caching": [2.5, 0.19],
+            "Full KV recompute": [2.7, 0.2]
+        }
+    }
+} 

@@ -20,7 +20,7 @@ def load_musique_data(save_path):
             "candidate_doc": target_doc,
             "question": question
         })
-    data = random.sample(data,256)
+    data = random.sample(data,128)
     json.dump(data,open(save_path,"w"),indent=4,ensure_ascii=False)
     return data
 
@@ -54,7 +54,7 @@ def check_content(text,question,answer):
         {
             "role": "user",
              "content": f""""
-I will input a text, a question, and the answer to the question. I want to modify the input text by replacing some key words so that the answer to the question changes. \nText: {text} \n Question: {question} \n Answer: {answer} \n Just give me the modified text.
+Please modify and replace some people's names, names of building locations, and some important times in the text. For example, replace "Paris" with "Singapore", "1920" with "2004", and "Beethoven" with "Trump".\nText: {text} \n Just give me the modified text.
             """,
         }
     ],
@@ -96,8 +96,6 @@ def random_split_chunks(text: str) -> list:
     # 第一阶段：按N个token分块\
     nlp = spacy.load('en_core_web_sm')  # 加载中文模型
 
-
-    # # tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
     doc = nlp(text)
     sentences = [sent.text for sent in doc.sents]
     # # primary_chunks = [tokens[i:i+chunk_size] for i in range(0, len(tokens), chunk_size)]
@@ -117,7 +115,7 @@ if __name__ == "__main__":
     # num_processes = min(64, len(data))
     
     # with multiprocessing.Pool(processes=num_processes) as pool:
-    #     data = pool.map(process_item, data)
+    #     data = pool.map(change_item, data)
     # json.dump(data,open(gpt_save_path,"w"),indent=4,ensure_ascii=False)
 
 
@@ -133,7 +131,8 @@ if __name__ == "__main__":
     for item in data:
         chunks = random_split_chunks(item["target_doc"])
         # for chunk in chunks:
-        item["candidates"] = chunks
+        item["candidates"] = chunks + [item["question"]]
+        item["candidates"] = ["\n "+ chunk for chunk in item["candidates"] ]
         new_data.append(item)
         item["target_doc"] = item["target_doc"]+"\n"+item["question"]
     json.dump(new_data,open(gpt_save_chunk_path,"w"),indent=4,ensure_ascii=False)

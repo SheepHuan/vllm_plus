@@ -88,11 +88,12 @@ Summarize and condense the following text into a short single sentence.\n{text}<
                                     las_additional_value_error = False,
                                     enable_compute_as=False,
                                     enable_kvshare_decode=False,
+                                    enable_cacheblend_decode=False,
                                     cacheblend_recomp_ratio=0.15,
                                     has_top_ratio=0.15,
                                       
                                       ):
-        data = json.load(open(input_path))[:128]
+        data = json.load(open(input_path))
        
         save_data = []
         os.makedirs(kvcache_save_dir,exist_ok=True)
@@ -148,7 +149,7 @@ Summarize and condense the following text into a short single sentence.\n{text}<
                 batch_candidate_token_ids,
                     batch_candidate_kvcache,
                     tokenizer=None,
-                    window_size=6)
+                    window_size=12)
             # 计算复用率
             reused_rate = [len(batch_reused_map_indices[i])/len(batch_target_token_ids[i]) for i in range(len(batch_target_token_ids))]
             print(f"复用率: {reused_rate}")
@@ -172,7 +173,8 @@ Summarize and condense the following text into a short single sentence.\n{text}<
                 enable_compute_as=enable_compute_as,
                 enable_kvshare_decode=enable_kvshare_decode,
                 cacheblend_recomp_ratio = cacheblend_recomp_ratio,
-                has_top_ratio = has_top_ratio
+                has_top_ratio = has_top_ratio,
+                enable_cacheblend_decode=enable_cacheblend_decode
             )
             max_request_id = max([int(pc_outputs.request_id) for pc_outputs in batch_pc_outputs])+1
             for sub_batch_idx,output in enumerate(batch_pc_outputs):
@@ -202,7 +204,8 @@ Summarize and condense the following text into a short single sentence.\n{text}<
                                         has_top_ratio=has_top_ratio)
     
     def generate_with_cacheblend(self,pipeline:KVShareNewPipeline,input_path,output_path,kvcache_path,batch_size=8,
-                                 cacheblend_recomp_ratio=0.15):
+                                 cacheblend_recomp_ratio=0.15,
+                                 enable_cacheblend_decode=False):
         self.generate_with_partial_compute(pipeline,input_path,output_path,kvcache_path,batch_size=batch_size,
                 enable_kvshare=False,
                 enable_cacheblend=True,
@@ -210,6 +213,7 @@ Summarize and condense the following text into a short single sentence.\n{text}<
                 has_additional_value_error = False,
                 las_additional_value_error = False,
                 enable_compute_as=False,
+                enable_cacheblend_decode=enable_cacheblend_decode,
                 cacheblend_recomp_ratio=cacheblend_recomp_ratio)
     
     def generate_with_only_compute_unreused(self,pipeline:KVShareNewPipeline,input_path,output_path,kvcache_path,batch_size=8):
@@ -221,7 +225,7 @@ Summarize and condense the following text into a short single sentence.\n{text}<
         
     def generate_full_compute(self,pipeline:KVShareNewPipeline,input_path,output_path,batch_size=8):
         
-        data = json.load(open(input_path))[:128]
+        data = json.load(open(input_path))
        
         save_data = []
 

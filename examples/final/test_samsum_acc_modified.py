@@ -63,9 +63,9 @@ if __name__ == "__main__":
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     os.environ["VLLM_USE_MODELSCOPE"]="True"
 
-    # model_name = "Qwen/Qwen2.5-7B-Instruct"
+    model_name = "Qwen/Qwen2.5-7B-Instruct"
     # model_name = "01ai/Yi-34B-Chat-4bits"
-    model_name = "LLM-Research/Meta-Llama-3.1-8B-Instruct"
+    # model_name = "LLM-Research/Meta-Llama-3.1-8B-Instruct"
     batch_size = 16
     max_model_len = 4096
     
@@ -89,8 +89,8 @@ if __name__ == "__main__":
     # ) 
     benchmark_test.generate_with_kvshare(
         pipeline, benchmark_opus_with_kvcache, benchmark_opus_kvshare, kvcache_path,batch_size=16,
-        enable_kvshare_decode=True,
-        has_top_ratio=0.10
+        enable_kvshare_decode=False,
+        has_top_ratio=0.20
     ) 
     # benchmark_test.generate_with_only_compute_unreused(
     #     pipeline, benchmark_opus_with_kvcache, benchmark_opus_only_compute_unreused, kvcache_path,batch_size=8

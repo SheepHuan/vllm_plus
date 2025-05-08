@@ -53,8 +53,8 @@ if __name__ == "__main__":
     #     item["candidate_doc_gpt"] = samsum_answer(item["target_doc"])
     #     gpt_candidates.append(item)
         
-    num_processes = min(64, len(data))
-    with multiprocessing.Pool(processes=num_processes) as pool:
-        gpt_data = pool.map(process_item, data)
+    # num_processes = min(64, len(data))
+    # with multiprocessing.Pool(processes=num_processes) as pool:
+    #     gpt_data = pool.map(process_item, data)
     
-    json.dump(gpt_data, open("examples/dataset/data/samsum/benchmark_samsum_dataset_gpt.json", "w"), indent=4, ensure_ascii=False)
+    # json.dump(gpt_data, open("examples/dataset/data/samsum/benchmark_samsum_dataset_gpt.json", "w"), indent=4, ensure_ascii=False)

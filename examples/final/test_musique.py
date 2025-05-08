@@ -26,6 +26,7 @@ import torch
 from test_xsum_acc_modified import BenchmarkTest
 import collections
 import string
+from typing import List
 
 def normalize_answer(s):
     """Normalize answer text for better matching."""
@@ -48,24 +49,41 @@ def parse_generation(generation):
     """Parse generated text to extract the answer."""
     return generation.strip()
 
-def compute_f1(a_pred, a_gold, tokenizer):
-    a_pred = parse_generation(a_pred)
-    gold_toks = tokenizer.encode(normalize_answer(a_gold))[1:]
-    pred_toks = tokenizer.encode(normalize_answer(a_pred))[1:]
-    #gold_toks = tokenizer.encode_chat_completion(ChatCompletionRequest(messages=[UserMessage(content=normalize_answer(a_gold))])).tokens[4:-4]
-    #pred_toks = tokenizer.encode_chat_completion(ChatCompletionRequest(messages=[UserMessage(content=normalize_answer(a_pred))])).tokens[4:-4]
-    #pdb.set_trace()
-    common = collections.Counter(gold_toks) & collections.Counter(pred_toks)
-    num_same = sum(common.values())
-    if len(gold_toks) == 0 or len(pred_toks) == 0:
-        # If either is no-answer, then F1 is 1 if they agree, 0 otherwise
-        return int(gold_toks == pred_toks)
-    if num_same == 0:
-        return 0
-    precision = 1.0 * num_same / len(pred_toks)
-    recall = 1.0 * num_same / len(gold_toks)
-    f1 = (2 * precision * recall) / (precision + recall)
-    return f1
+def compute_f1_token(pred_tokens: List[int], ans_tokens: List[int]) -> float:
+    """基于Tokenizer输出计算F1分数（词表存在性判断版）
+    
+    Args:
+        pred_tokens: 预测token的ID列表，如[101, 2023, 2003, ...]
+        ans_tokens: 答案token的ID列表
+        
+    Returns:
+        F1分数值，范围[0,1]
+    """
+    # 转换为集合消除重复（根据NLP常规评估逻辑）
+    pred_set = set(pred_tokens)  
+    ans_set = set(ans_tokens)
+    
+    # 计算匹配指标
+    tp = len(pred_set & ans_set)   # 共同存在的唯一token数
+    fp = len(pred_set - ans_set)   # 预测多余token数
+    fn = len(ans_set - pred_set)   # 答案未覆盖token数
+    
+    # 防止除零错误的稳健计算（参考最佳实践[3,7](@ref)）
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    
+    # 调和平均计算（核心公式[2,6](@ref)）
+    if (precision + recall) == 0:
+        return 0.0
+    return 2 * (precision * recall) / (precision + recall)
+
+tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
+def compute_f1(pred_text, ans_text):
+    token1 = tokenizer.encode(pred_text.lower())
+    token2 = tokenizer.encode(ans_text.lower())
+    
+    return compute_f1_token(token1,token2)
+
 
 class MUSIQUEBenchmarkTest(BenchmarkTest):
     
@@ -88,7 +106,7 @@ class MUSIQUEBenchmarkTest(BenchmarkTest):
         self.template = self.TEMPLATE[model_name]
     
     def compute_metric(self,pred_output,target_output):
-        return compute_f1(pred_output, target_output, self.tokenizer)
+        return compute_f1(pred_output, target_output)
     
     
 
@@ -123,14 +141,14 @@ if __name__ == "__main__":
     # benchmark_test.generate_full_compute(pipeline, benchmark_opus, benchmark_opus_full_compute,batch_size=16)
     
     # benchmark_test.generate_with_cacheblend(
-    #     pipeline, benchmark_opus_with_kvcache, benchmark_opus_cacheblend, kvcache_path,batch_size=8,
-    #     cacheblend_recomp_ratio=0.60
+    #     pipeline, benchmark_opus_with_kvcache, benchmark_opus_cacheblend, kvcache_path,batch_size=16,
+    #     cacheblend_recomp_ratio=0.30
     # ) 
     benchmark_test.generate_with_kvshare(
         pipeline, benchmark_opus_with_kvcache, benchmark_opus_kvshare, kvcache_path,batch_size=16,
-        enable_kvshare_decode=False,
-        has_top_ratio=0.6
+        enable_kvshare_decode=True,
+        has_top_ratio=0.20
     ) 
     # benchmark_test.generate_with_only_compute_unreused(
-    #     pipeline, benchmark_opus_with_kvcache, benchmark_opus_only_compute_unreused, kvcache_path,batch_size=8
+    #     pipeline, benchmark_opus_with_kvcache, benchmark_opus_only_compute_unreused, kvcache_path,batch_size=16
     # ) 

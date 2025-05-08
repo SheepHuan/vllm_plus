@@ -3,8 +3,8 @@ import random
 
 # 文件路径
 fc_path = "examples/dataset/data/gsm8k/gsm8k_benchmark_full_compute.json"
-cacheblend_path = "examples/dataset/data/gsm8k/gsm8k_benchmark_cachblend-0.6.json"
-kvshare_path = "examples/dataset/data/gsm8k/gsm8k_benchmark_kvshare-0.6.json"
+cacheblend_path = "examples/dataset/data/gsm8k/gsm8k_benchmark_cachblend.json"
+kvshare_path = "examples/dataset/data/gsm8k/gsm8k_benchmark_kvshare.json"
 # naive_path = "examples/dataset/data/gsm8k/gsm8k_benchmark_only_compute_unreused.json"
 # 读取文件
 def load_json(file_path):
@@ -461,6 +461,66 @@ if best_filtered_questions:
         print("\n❌ 未能同时满足所有条件")
 else:
     print("\n未找到满足条件的筛选方案。")
+
+print("\n分析FC和KV成功但CB失败的案例:")
+fc_kv_success_cb_fail = []
+for doc, info in question_scores.items():
+    if info['fc_score'] == 1 and info['kv_score'] == 1 and info['cb_score'] == 0:
+        fc_kv_success_cb_fail.append(doc)
+
+print(f"找到 {len(fc_kv_success_cb_fail)} 个FC和KV成功但CB失败的案例")
+
+# 保存这些案例到文件
+if fc_kv_success_cb_fail:
+    # 提取完整的案例数据
+    selected_cases = [question_scores[doc]['data'] for doc in fc_kv_success_cb_fail]
+    
+    # 保存到文件
+    output_path = "examples/dataset/data/gsm8k/gsm8k_fc_kv_success_cb_fail.json"
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(selected_cases, f, indent=4, ensure_ascii=False)
+    
+    print(f"\n已将{len(selected_cases)}个案例保存到: {output_path}")
+    
+    # 随机选择5个案例进行展示
+    print("\n随机展示5个案例:")
+    sample_cases = random.sample(selected_cases, min(5, len(selected_cases)))
+    for i, case_data in enumerate(sample_cases, 1):
+        print(f"\n案例 {i}:")
+        print(f"问题: {case_data['target_doc']}")
+        print(f"FC答案: {case_data.get('full_compute_answer', 'N/A')}")
+        print(f"KV答案: {case_data.get('kvshare_answer', 'N/A')}")
+        print(f"CB答案: {case_data.get('cacheblend_answer', 'N/A')}")
+
+print("\n分析KV失败但FC和CB成功的案例:")
+fc_cb_success_kv_fail = []
+for doc, info in question_scores.items():
+    if info['fc_score'] == 1 and info['kv_score'] == 0 and info['cb_score'] == 1:
+        fc_cb_success_kv_fail.append(doc)
+
+print(f"找到 {len(fc_cb_success_kv_fail)} 个KV失败但FC和CB成功的案例")
+
+# 保存这些案例到文件
+if fc_cb_success_kv_fail:
+    # 提取完整的案例数据
+    selected_cases = [question_scores[doc]['data'] for doc in fc_cb_success_kv_fail]
+    
+    # 保存到文件
+    output_path = "examples/dataset/data/gsm8k/gsm8k_fc_cb_success_kv_fail.json"
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(selected_cases, f, indent=4, ensure_ascii=False)
+    
+    print(f"\n已将{len(selected_cases)}个案例保存到: {output_path}")
+    
+    # 随机选择5个案例进行展示
+    print("\n随机展示5个案例:")
+    sample_cases = random.sample(selected_cases, min(5, len(selected_cases)))
+    for i, case_data in enumerate(sample_cases, 1):
+        print(f"\n案例 {i}:")
+        print(f"问题: {case_data['target_doc']}")
+        print(f"FC答案: {case_data.get('full_compute_answer', 'N/A')}")
+        print(f"KV答案: {case_data.get('kvshare_answer', 'N/A')}")
+        print(f"CB答案: {case_data.get('cacheblend_answer', 'N/A')}")
 
 
 

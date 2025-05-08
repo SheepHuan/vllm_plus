@@ -49,16 +49,19 @@ def random_split_chunks(text: str, chunk_size: int) -> list:
     返回：
     List[str] 分块后的文本列表
     """
-    # 第一阶段：按N个token分块\
-    nlp = spacy.load('en_core_web_sm')  # 加载中文模型
-
-
-    # # tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
+    nlp = spacy.load('en_core_web_sm')  # 加载英文模型
     doc = nlp(text)
     sentences = [sent.text for sent in doc.sents]
-    # # primary_chunks = [tokens[i:i+chunk_size] for i in range(0, len(tokens), chunk_size)]
-    return sentences
-    # return [text]
+    
+    # 将第一个句子放到末尾
+    if len(sentences) > 1:
+        first_sentence = sentences.pop(0)
+        sentences.append(first_sentence)
+    
+    # 将打乱后的句子重新组合成一句话
+    shuffled_text = "\n\n\n\n".join(sentences)
+    
+    return [shuffled_text]
 
 
 def gsm8k_candidate_generate(text):

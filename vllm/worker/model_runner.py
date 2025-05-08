@@ -1824,8 +1824,11 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             with set_forward_context(model_input.attn_metadata,
                                      self.vllm_config, virtual_engine):
                 # if self.model.model.cache_fuse_metadata['enable_kvshare']:
-                if model_input.attn_metadata.decode_metadata and self._kvshare_metadata.is_partial_compute and self.model.model.cache_fuse_metadata["enable_kvshare"] \
-                    and self.model.model.cache_fuse_metadata["enable_kvshare_decode"]:
+                if model_input.attn_metadata.decode_metadata and self._kvshare_metadata.is_partial_compute and \
+                   ( (self.model.model.cache_fuse_metadata["enable_kvshare"] \
+                    and self.model.model.cache_fuse_metadata["enable_kvshare_decode"]) or \
+                        (self.model.model.cache_fuse_metadata["enable_cacheblend"] \
+                    and self.model.model.cache_fuse_metadata["enable_cacheblend_decode"])):
                     # 修改decode阶段的model_input
                     self.model.model.cache_fuse_metadata['batch_seq_start_loc'] = model_input.attn_metadata.seq_start_loc
                     block_tables_for_each_request = model_input.attn_metadata.block_tables
@@ -1952,7 +1955,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             return hidden_or_intermediate_states
 
         if self._kvshare_metadata.is_partial_compute and model_input.attn_metadata.prefill_metadata \
-            and self.model.model.cache_fuse_metadata['enable_kvshare'] and self.model.model.cache_fuse_metadata['enable_kvshare_decode']:
+            and ((self.model.model.cache_fuse_metadata['enable_kvshare'] and self.model.model.cache_fuse_metadata['enable_kvshare_decode']) or \
+                (self.model.model.cache_fuse_metadata['enable_cacheblend'] and self.model.model.cache_fuse_metadata['enable_cacheblend_decode'])):
             batch_has_token_indices = self.model.model.cache_fuse_metadata['has_token_indices']
             batch_las_token_indices = self.model.model.cache_fuse_metadata['las_token_indices']
             # 将batch_has_token_indices和batch_las_token_indices根据seq_start_loc进行切分到对应的request id上
