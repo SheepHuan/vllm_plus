@@ -386,7 +386,7 @@ class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def forward(
         self,
         input_ids: torch.Tensor,

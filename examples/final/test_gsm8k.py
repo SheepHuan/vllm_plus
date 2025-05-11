@@ -87,8 +87,8 @@ if __name__ == "__main__":
     os.environ["CUDA_VISIBLE_DEVICES"] = "1"
     os.environ["VLLM_USE_MODELSCOPE"]="True"
 
-    model_name = "Qwen/Qwen2.5-7B-Instruct"
-    # model_name = "LLM-Research/Meta-Llama-3.1-8B-Instruct"
+    # model_name = "Qwen/Qwen2.5-7B-Instruct"
+    model_name = "LLM-Research/Meta-Llama-3.1-8B-Instruct"
     batch_size = 16
     max_model_len = 4096
     
@@ -106,15 +106,15 @@ if __name__ == "__main__":
     
     # benchmark_test.generate_full_compute(pipeline, benchmark_opus, benchmark_opus_full_compute,batch_size=16)
     
-    benchmark_test.generate_with_cacheblend(
-        pipeline, benchmark_opus_with_kvcache, benchmark_opus_cacheblend, kvcache_path,batch_size=32,
-        cacheblend_recomp_ratio=0.20,enable_cacheblend_decode=False
-    ) 
-    # benchmark_test.generate_with_kvshare(
-    #     pipeline, benchmark_opus_with_kvcache, benchmark_opus_kvshare, kvcache_path,batch_size=32,
-    #     enable_kvshare_decode=False,
-    #     has_top_ratio=0.20
+    # benchmark_test.generate_with_cacheblend(
+    #     pipeline, benchmark_opus_with_kvcache, benchmark_opus_cacheblend, kvcache_path,batch_size=32,
+    #     cacheblend_recomp_ratio=0.40,enable_cacheblend_decode=True
     # ) 
+    benchmark_test.generate_with_kvshare(
+        pipeline, benchmark_opus_with_kvcache, benchmark_opus_kvshare, kvcache_path,batch_size=32,
+        enable_kvshare_decode=True,
+        has_top_ratio=0.40
+    ) 
     # benchmark_test.generate_with_only_compute_unreused(
     #     pipeline, benchmark_opus_with_kvcache, benchmark_opus_only_compute_unreused, kvcache_path,batch_size=16
     # ) 

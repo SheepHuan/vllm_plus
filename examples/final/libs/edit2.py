@@ -569,7 +569,7 @@ class KVEditor:
         #                 unreused_map_indices.append(idx)
         
         # 确保最后3个token被重新计算
-        last_tokens_indices = [target_len-1,target_len-2,target_len-3]
+        last_tokens_indices = list(range(target_len-3,target_len))
         unreused_map_indices = list(set(unreused_map_indices+last_tokens_indices))
         for idx in last_tokens_indices:
             if idx in reused_map_indices:
@@ -605,7 +605,7 @@ class KVEditor:
         batch_target_kvcache = []
         batch_reused_map_indices = []
         batch_unreused_map_indices = []
-        
+        qwen_tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
         for batch_idx, target_token_ids in enumerate(batch_targets_token_ids):
             # 获取当前批次项对应的候选文本和KV缓存
             candidates_token_ids_list = batch_candidates_token_ids_list[batch_idx]
@@ -621,6 +621,17 @@ class KVEditor:
                 window_size,
                 tokenizer
             )
+            # 定义绿色的 ANSI 转义序列
+            # GREEN = '\033[92m'
+            # RESET = '\033[0m'
+            # # print()
+            
+            # for idx,token_id in enumerate(target_token_ids):
+            #     if idx in reused_map_indices:
+            #         print(f"{GREEN}{qwen_tokenizer.decode(token_id)}{RESET}",end=" ")
+            #     else:
+            #         print(qwen_tokenizer.decode(token_id),end=" ")
+            
             assert len(target_token_ids)== target_kvcache.shape[2]
             batch_target_kvcache.append(target_kvcache)
             batch_reused_map_indices.append(reused_map_indices)
@@ -662,17 +673,22 @@ def test_acc():
 if __name__=="__main__":
     # KVEditor.test_acc()
     # test kvedit_v2
-    a = "\n banana, orange, pear, pineapple, mango, strawberry, grape, apple."
+    a = "\n A whirligig spins at five times the speed of a thingamabob. A whatchamacallit spins eleven times faster than a thingamabob. A whatchamacallit spins at 121 meters per second. How fast does a whirligig spin? \n"
     b = [
-          "\n mango, mango, mango, mango, mango, mango, grape, apple.",
-          "\n mango, orange, pear, pineapple, time, time, time, time."
+         "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n A whirligig spins at five times the speed of a thingamabob.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n A whatchamacallit spins eleven times faster than a thingamabob.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n A whatchamacallit spins at 121 meters per second.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n How fast does a whirligig spin?\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n "
     ]
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
     a_token_ids = tokenizer.encode(a)
     b_token_ids = [tokenizer.encode(b_item) for b_item in b]
     b_kvcache = [torch.randn(1,2,len(b_item),128) for b_item in b_token_ids]
     batch_target_kvcache, batch_reused_map_indices, batch_unreused_map_indices = KVEditor.kvedit_v2(a_token_ids,b_token_ids,b_kvcache)
-    # print(res)
-    for i in range(len(batch_reused_map_indices)):
-        print(tokenizer.decode(a_token_ids[batch_reused_map_indices[i]]))
+    # 定义绿色的 ANSI 转义序列
+    GREEN = '\033[92m'
+    RESET = '\033[0m'
+    # print()
+    for idx,token_id in enumerate(a_token_ids):
+        if idx in batch_reused_map_indices:
+            print(f"{GREEN}{tokenizer.decode(token_id)}{RESET}",end=" ")
+        else:
+            print(tokenizer.decode(token_id),end=" ")
         

@@ -13,7 +13,7 @@ def load_samsum(max_num=256):
     # dataset = random.sample(dataset,max_num)
     for item in dataset:
         tokens = tokenizer.encode(item["dialogue"])
-        if len(tokens) <= 256 or len(tokens) >= 1024:
+        if len(tokens) <= 256 or len(tokens) >= 512:
             continue
         data.append(
             {
@@ -81,33 +81,44 @@ def random_split_chunks(text: str, chunk_size: int) -> list:
     
     参数：
     text: 原始文本字符串
-    tokenizer: transformers的分词器对象
     chunk_size: 初始分块的token数（N）
     
     返回：
     List[str] 分块后的文本列表
     """
-    # 第一阶段：按N个token分块\
-    nlp = spacy.load('en_core_web_sm')  # 加载中文模型
-    doc = nlp(text)
-    sentences = [sent.text for sent in doc.sents]
-    return sentences
-
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
+    tokens = tokenizer.encode(text)
+    
+    # 按chunk_size分块
+    chunks = []
+    for i in range(0, len(tokens), chunk_size):
+        chunks.append(tokens[i:i+chunk_size])
+    
+    # 处理最后一个chunk
+    if len(chunks) > 1 and len(chunks[-1]) < chunk_size:
+        # 如果最后一个chunk不足chunk_size且存在前一个chunk，则合并到前一个chunk
+        chunks[-2].extend(chunks.pop())
+    
+    # 将每个chunk的tokens解码为字符串
+    return [tokenizer.decode(chunk) for chunk in chunks]
+    
+    
 
 
 def chunk_data(data,chunk_size=96):
     for item in data:
-        chunk_tokens = random_split_chunks(item["candidate_doc"],chunk_size)
-        item["candidates"] = ["\n"+chunk+"\n" for chunk in chunk_tokens]
+        chunk_tokens = random_split_chunks(item["candidate_doc"],chunk_size) + [ "Please summarize the main content of the following text. The summary should be concise and clear, and key information should be retained. "]
+        item["candidates"] = [" \n \n \n \n \n \n \n \n \n "+chunk+" \n \n \n \n \n \n \n \n \n " for chunk in chunk_tokens]
+        item["target_doc"] = item["target_doc"] + " \n " +  "Please summarize the main content of the following text. The summary should be concise and clear, and key information should be retained. "
     return data
 
 if __name__ == "__main__":
-    # load_samsum()
+    load_samsum()
     # data = json.load(open("examples/dataset/data/samsum/sim_samsum_benchmark_dataset.json","r",encoding="utf-8"))
     # with multiprocessing.Pool(processes=16) as pool:
     #     data = list(tqdm(pool.imap(process_item, data), total=len(data)))
     # json.dump(data,open("examples/dataset/data/samsum/sim_samsum_benchmark_dataset_gpt.json","w"),indent=4,ensure_ascii=False)
 
-    data = json.load(open("examples/dataset/data/samsum/sim_samsum_benchmark_dataset_gpt.json","r",encoding="utf-8"))
-    data = chunk_data(data,chunk_size=128)
+    data = json.load(open("examples/dataset/data/samsum/sim_samsum_benchmark_dataset.json","r",encoding="utf-8"))
+    data = chunk_data(data,chunk_size=64)
     json.dump(data,open("examples/dataset/data/samsum/sim_samsum_benchmark_dataset_chunk.json","w"),indent=4,ensure_ascii=False)

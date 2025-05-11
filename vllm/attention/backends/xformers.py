@@ -345,47 +345,44 @@ class XFormersMetadataBuilder(CommonMetadataBuilder[XFormersMetadata]):
     _metadata_cls = XFormersMetadata
 
 
-def delta_a_approx(q, k, v, delta_k, delta_v):
-    # q: (head, seq_q, dim)
-    # k, v, delta_k, delta_v: (head, seq_kv, dim)
-    head, seq_q, dim = q.shape
-    seq_kv = k.shape[1]
+def delta_a_approx_autograd(q, k, v, delta_k, delta_v):
+    head, seq, dim = q.shape
     sqrt_d = math.sqrt(dim)
-    # 1. 计算 W = softmax(QK^T / sqrt(d_k))
-    W = torch.softmax(torch.matmul(q, k.transpose(-2, -1)) / sqrt_d, dim=-1)  # (head, seq_q, seq_kv)
+    
+    # 原始KV计算A
+    k = k.clone().requires_grad_(True)
+    v = v.clone().requires_grad_(True)
+    mask = torch.tril(torch.ones(seq, seq, device=q.device))
+    scores = torch.matmul(q, k.transpose(-2, -1)) / sqrt_d
+    scores = scores.masked_fill(mask == 0, float('-inf'))
+    attn = torch.softmax(scores, dim=-1)
+    A = torch.matmul(attn, v)
+    
+    # 计算ΔA
+    k_delta = k + delta_k
+    v_delta = v + delta_v
+    scores_delta = torch.matmul(q, k_delta.transpose(-2, -1)) / sqrt_d
+    scores_delta = scores_delta.masked_fill(mask == 0, float('-inf'))
+    attn_delta = torch.softmax(scores_delta, dim=-1)
+    A_delta = torch.matmul(attn_delta, v_delta)
+    
+    # 计算|ΔA|
+    delta_A = (torch.abs(A_delta - A)).norm(dim=(0,2))  # (seq,)
+    
+    # 计算每个token的贡献
+    loss = delta_A.sum()
+    loss.backward()
+    
+    # 计算每个token对|ΔA|的影响
+    impact_v = (v.grad * delta_v.abs()).norm(dim=(0,2))  # (seq,)
+    impact_k = (k.grad * delta_k.abs()).norm(dim=(0,2))  # (seq,)
+    
+    # 归一化
+    impact_v = (impact_v - impact_v.min()) / (impact_v.max() - impact_v.min() + 1e-8)
+    impact_k = (impact_k - impact_k.min()) / (impact_k.max() - impact_k.min() + 1e-8)
+    
+    return impact_v, impact_k, delta_A
 
-    # ΔV对ΔA的影响
-    impact_v = []
-    for i in range(seq_kv):
-        # 计算每个token的value变化对注意力输出的影响
-        # W[:,:,i]: (head, seq_q) - 表示所有query对第i个key的注意力权重
-        # delta_v[:,i,:]: (head, dim) - 第i个token的value变化
-        wv = W[:,:,i].unsqueeze(-1) * delta_v[:,i,:].unsqueeze(1)  # (head, seq_q, dim)
-        # 计算每个token的value变化对输出的影响大小
-        impact_v.append(torch.abs(wv).sum())  # 对所有维度的绝对值求和
-    impact_v = torch.stack(impact_v)  # (seq_kv,)
-
-    # ΔK对ΔA的影响
-    # 计算注意力矩阵对key的梯度
-    diag_WV = torch.einsum('hij,hjd->hid', W, v)  # (head, seq_q, dim)
-    tmp = torch.matmul(W, v)  # (head, seq_q, dim)
-    tmp2 = torch.matmul(W.transpose(-2, -1), q)  # (head, seq_kv, dim)
-    SSVTQ = torch.matmul(W, tmp2)  # (head, seq_q, dim)
-    dA_dK = (diag_WV - SSVTQ) / sqrt_d  # (head, seq_q, dim)
-
-    # 计算每个token的key变化对注意力输出的影响
-    impact_k = []
-    for i in range(seq_kv):
-        # 计算key变化对注意力矩阵的影响
-        # dA_dK: (head, seq_q, dim) - 注意力矩阵对key的梯度
-        # delta_k[:,i,:]: (head, dim) - 第i个token的key变化
-        kk = dA_dK[:,:,:] * delta_k[:,i,:].unsqueeze(1)  # (head, seq_q, dim)
-        # 计算每个token的key变化对输出的影响大小
-        impact_k.append(torch.abs(kk).sum())  # 对所有维度的绝对值求和
-    impact_k = torch.stack(impact_k)  # (seq_kv,)
-
-    # 返回每个token的key和value变化对注意力输出的影响大小
-    return impact_v, impact_k
 
 class XFormersImpl(AttentionImpl[XFormersMetadata]):
     """
@@ -588,16 +585,6 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     cache_fuse_metadata["las_token_indices"] = batch_bottom_indices
                     
                     
-                    # topk_error_num = max(1,int(cache_fuse_metadata["recomp_ratio"]*len(old_kv_map_indices)))
-                    # bottomk_error_num = max(1,int((1-cache_fuse_metadata["recomp_ratio"])*len(old_kv_map_indices)))
-                    # temp_diff = torch.sum((value[old_kv_map_indices,:,:]-value_old[old_kv_map_indices,:,:])**2, dim=[1,2])
-                    # top_indices = torch.topk(temp_diff, k=topk_error_num).indices
-                    # cache_fuse_metadata["has_token_indices"] = top_indices    
-                    # bottom_indices = torch.topk(temp_diff, k= bottomk_error_num,largest=False).indices
-                    # cache_fuse_metadata["las_token_indices"] = bottom_indices
-                    
-                    
-                    
                     top_indices = torch.cat([old_kv_map_indices[batch_top_indices],cache_fuse_metadata["additional_map_indices"],last_token_indices])
                     top_indices = torch.unique(top_indices)
                     top_indices,_ = torch.sort(top_indices)
@@ -616,7 +603,6 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                         for i in range(len(cache_fuse_metadata["batch_seq_start_loc"])-1):
                             if index >= cache_fuse_metadata["batch_seq_start_loc"][i] and index < cache_fuse_metadata["batch_seq_start_loc"][i+1]:
                                 attn_bias[:,idx,cache_fuse_metadata["batch_seq_start_loc"][i]:index+1] = 1
-                                # attn_bias[:,idx,:index+1] = 1
                     
                     cache_fuse_metadata["prefill_atten_bias"] = attn_bias
                     attn_metadata.prefill_metadata.attn_bias=None
@@ -636,7 +622,6 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     additional_map_indices = cache_fuse_metadata["additional_map_indices"]
                     delta_v = torch.sum(torch.abs(value.reshape(-1,self.num_kv_heads*self.head_size)-old_kv[1]),dim=-1)
                     last_token_indices = cache_fuse_metadata["batch_seq_start_loc"][1:]-1
-                    # attn_bias = torch.zeros(1,len(last_token_indices),len(old_kv_map_indices),device=query.device,dtype=torch.bool)
                     
                     # batch_top_indices = []
                     # batch_bottom_indices = []
@@ -646,33 +631,53 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     #     sub_reused_position = torch.where(torch.logical_and(old_kv_map_indices>=start_loc,old_kv_map_indices<=end_loc))[0]
                     #     sub_unreused_position = torch.where(torch.logical_and(additional_map_indices>=start_loc,additional_map_indices<=end_loc))[0]
                         
-                    #     # 计算子序列的注意力得分
-                    #     sub_atten_score = torch.softmax(torch.matmul(
-                    #         query[-2,:,:].reshape(-1,self.num_heads,self.head_size).transpose(0,1)
-                    #         ,repeat_kv(key[sub_reused_position,...],self.num_heads//self.num_kv_heads).reshape(self.num_heads,self.head_size,-1)\
-                    #         /math.sqrt(
-                    #         self.head_size
-                    #     )),dim=-1).mean(dim=0)
-                    #     sub_atten_score = torch.sum(sub_atten_score,dim=0)
-                    #     # pass
+
+                    #     k_repeat = repeat_kv(key[start_loc:end_loc+1,...],self.num_heads//self.num_kv_heads).reshape(self.num_heads,self.head_size,-1).transpose(1,2)
+                    #     v_repeat = repeat_kv(value[start_loc:end_loc+1,...],self.num_heads//self.num_kv_heads).reshape(self.num_heads,self.head_size,-1).transpose(1,2)
                         
-                    #     # 计算重要性
-                    #     importance_score = sub_atten_score * delta_v[sub_reused_position]
-                    #     # importance_score = sub_atten_score[sub_reused_position-start_loc]
-                    #     # importance_score = importance_score
+                    #     old_k = old_kv[0][start_loc:end_loc+1,...].reshape(-1,self.num_kv_heads,self.head_size)
+                    #     old_v = old_kv[1][start_loc:end_loc+1,...].reshape(-1,self.num_kv_heads,self.head_size)
+                    #     old_k[sub_unreused_position,...] =  key[sub_unreused_position,...]
+                    #     old_v[sub_unreused_position,...] = value[sub_unreused_position,...]
+                    #     delta_k  = old_k - key[start_loc:end_loc+1,...]
+                    #     delta_v  = old_v - value[start_loc:end_loc+1,...]
+                        
+                    #     delta_k_repeat = repeat_kv(delta_k,self.num_heads//self.num_kv_heads).reshape(self.num_heads,self.head_size,-1).transpose(1,2)
+                    #     delta_v_repeat = repeat_kv(delta_v,self.num_heads//self.num_kv_heads).reshape(self.num_heads,self.head_size,-1).transpose(1,2)
+                        
+                    #     key_importance,value_importance,_ = delta_a_approx_autograd(
+                    #         query[start_loc:end_loc+1,...].transpose(0,1),
+                    #         k_repeat,
+                    #         v_repeat,
+                    #         delta_k_repeat,
+                    #         delta_v_repeat,
+                    #     )
+                    #     # 分别获取value_importance和key_importance的top k个索引
                     #     topk_num = max(1,int(cache_fuse_metadata["has_top_ratio"]*len(sub_reused_position)))
-                    #     bottomk_num = max(1,int(cache_fuse_metadata["las_top_ratio"]*len(sub_reused_position)))
                         
-                    #     # 先按importance_score排序，如果importance_score小于1e-6，则按照delta_v排序
-                    #     topk_indices = torch.topk(importance_score,k=topk_num).indices
-                    #     bottomk_indices = torch.topk(importance_score,k=bottomk_num,largest=False).indices
+                    #     # 获取value_importance的top k个索引
+                    #     value_topk_indices = torch.topk(value_importance,k=topk_num).indices
+                        
+                    #     # 获取key_importance的top k个索引
+                    #     key_topk_indices = torch.topk(key_importance,k=topk_num).indices
+                        
                     #     # 
-                    #     topk_indices = [sub_reused_position[idx].item() for idx in topk_indices]
-                    #     bottomk_indices = [sub_reused_position[idx].item() for idx in bottomk_indices]
+                        
+                    #     # # 合并并去重得到topk_indices
+                    #     topk_indices = torch.cat([value_topk_indices, key_topk_indices]).unique()
+                        
+                    #     # 确保topk_indices的所有元素都在sub_reused_position中
+                    #     topk_indices = [idx.item()+start_loc.item() for idx in topk_indices if idx in sub_reused_position]
+                        
+                    #     # 获取bottomk_indices: 从sub_reused_position中去除topk_indices
+                    #     # all_indices = set(range(start_loc,end_loc+1))
+                    #     top_indices_set = set(topk_indices)
+                    #     bottomk_indices = list(set(sub_reused_position.tolist() )- top_indices_set)
+                        
+                    #     # 转换回原始索引
+                    #     # bottomk_indices = [idx.item() for idx in bottomk_indices if idx in sub_reused_position]
                     #     batch_top_indices.extend(topk_indices)
                     #     batch_bottom_indices.extend(bottomk_indices)
-
-                                        
                     batch_top_indices = []
                     batch_bottom_indices = []
                     # 处理子序列，每个序列是一个独立的请求
@@ -681,38 +686,35 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                         sub_reused_position = torch.where(torch.logical_and(old_kv_map_indices>=start_loc,old_kv_map_indices<=end_loc))[0]
                         sub_unreused_position = torch.where(torch.logical_and(additional_map_indices>=start_loc,additional_map_indices<=end_loc))[0]
                         
-
-                        k_repeat = repeat_kv(key[sub_reused_position,...],self.num_heads//self.num_kv_heads).reshape(self.num_heads,self.head_size,-1).transpose(1,2)
-                        v_repeat = repeat_kv(value[sub_reused_position,...],self.num_heads//self.num_kv_heads).reshape(self.num_heads,self.head_size,-1).transpose(1,2)
+                        # 计算子序列的注意力得分
+                        sub_atten_score = torch.softmax(torch.matmul(
+                            query[-2,:,:].reshape(-1,self.num_heads,self.head_size).transpose(0,1)
+                            ,repeat_kv(key[sub_reused_position,...],self.num_heads//self.num_kv_heads).reshape(self.num_heads,self.head_size,-1)\
+                            /math.sqrt(
+                            self.head_size
+                        )),dim=-1).mean(dim=0)
+                        sub_atten_score = torch.sum(sub_atten_score,dim=0)
+                        # pass
                         
-                        old_k = old_kv[0][sub_reused_position,...].reshape(-1,self.num_kv_heads,self.head_size)
-                        old_v = old_kv[1][sub_reused_position,...].reshape(-1,self.num_kv_heads,self.head_size)
-                        delta_k  = old_k - key[sub_reused_position,...]
-                        delta_v  = old_v - value[sub_reused_position,...]
-                        
-                        delta_k_repeat = repeat_kv(delta_k,self.num_heads//self.num_kv_heads).reshape(self.num_heads,self.head_size,-1).transpose(1,2)
-                        delta_v_repeat = repeat_kv(delta_v,self.num_heads//self.num_kv_heads).reshape(self.num_heads,self.head_size,-1).transpose(1,2)
-                        
-                        
-                        key_importance,value_importance = delta_a_approx(
-                            query[-2:,:,:].transpose(0,1),
-                            k_repeat,
-                            v_repeat,
-                            delta_k_repeat,
-                            delta_v_repeat
-                        )
-                        importance_score =  value_importance + key_importance
-
+                        # 计算重要性
+                        importance_score = sub_atten_score * delta_v[sub_reused_position]
+                        # importance_score = sub_atten_score[sub_reused_position-start_loc]
+                        # importance_score = importance_score
                         topk_num = max(1,int(cache_fuse_metadata["has_top_ratio"]*len(sub_reused_position)))
                         bottomk_num = max(1,int(cache_fuse_metadata["las_top_ratio"]*len(sub_reused_position)))
                         
-                        topk_indices = torch.topk(importance_score,k=topk_num).indices
-                        bottomk_indices = torch.topk(importance_score,k=bottomk_num,largest=False).indices
-                        # 
-                        topk_indices = [sub_reused_position[idx].item() for idx in topk_indices]
-                        bottomk_indices = [sub_reused_position[idx].item() for idx in bottomk_indices]
-                    
                         
+                        # 
+                        topk_as_indices = torch.topk(sub_atten_score,k=topk_num).indices
+                        # 先按importance_score排序，如果importance_score小于1e-6，则按照delta_v排序
+                        topk_indices = torch.topk(importance_score,k=topk_num).indices
+                        
+                        # topk_indices = torch.cat([topk_as_indices,topk_indices])
+                        # topk_indices = torch.unique(topk_indices)
+                        # print(len(topk_indices)/topk_num * cache_fuse_metadata["has_top_ratio"])
+                        
+                        topk_indices = [sub_reused_position[idx].item() for idx in topk_indices if importance_score[idx]]
+                        bottomk_indices = [idx.item() for i,idx in enumerate(sub_reused_position) if idx not in topk_indices and importance_score[i]]
                         batch_top_indices.extend(topk_indices)
                         batch_bottom_indices.extend(bottomk_indices)
                     

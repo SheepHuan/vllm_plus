@@ -3,32 +3,58 @@ import numpy as np
 import matplotlib.ticker as ticker
 
 # 数据集名称
-datasets = ['GSM8K', 'SAMSum']
+datasets = ['GSM8K', 'DROP']
 # 评估指标类型
-metrics = ['acc', 'rougeL']
+metrics = ['Accuracy', 'EM Score']
 # 缓存方法
-cache_methods = ['CacheBlend', 'KVShare (our)', 'Naive', 'FULL COMPUTE']
+cache_methods = ['CacheBlend-prefill', 'CacheBlend-prefill+decode', 'KVShare-prefill (our)', 'KVShare-prefill+decode (our)', 'Naive', 'FR']
+# 模型名称
+models = ['Qwen2.5-7B', 'Llama-3.1-8B']
 
 # 示例数据 - 使用更接近图片中的数据
 # 格式: [x, y] 代表 [重计算比例(%), 评分]
 data = {
-    'GSM8K': {
-        'CacheBlend': [[10, 0.55468], [20, 0.6953], [30, 0.7734], [40, 0.8203125],[50,0.859375]],
-        'KVShare (our)': [[10, 0.734375], [20, 0.7609375], [30,0.7978], [40, 0.8223],[50,0.8578]],
-        'Naive': [[90, 0.4609375]],
-        'FULL COMPUTE': [[100, 0.859375]]
+    'Qwen2.5-7B': {
+     'GSM8K': {
+        'CacheBlend-prefill': [[10, 0.42], [20, 0.511], [30, 0.54], [40, 0.609]],
+        'CacheBlend-prefill+decode': [[10, 0.722], [20, 0.718], [30, 0.7187], [40, 0.7265]],
+        'KVShare-prefill (our)': [[10, 0.5], [20, 0.523], [30,0.554], [40, 0.6328]],
+        'KVShare-prefill+decode (our)': [[10, 0.757], [20, 0.7187], [30,0.7148], [40, 0.7148]],
+        'Naive': [[90, 0.5]],
+        'FR': [[100, 0.828125]]
     },
-    'SAMSum': {
-        'CacheBlend': [[10, 0.2445], [20, 0.2563], [30, 0.2663]],
-        'KVShare (our)': [[10, 0.2471], [20, 0.2596], [30, 0.2701]],
-        'Naive': [[90, 0.2407]],
-        'FULL COMPUTE': [[100, 0.2740]]
+    'DROP': {
+        'CacheBlend-prefill': [[10, 0.367], [20, 0.3828], [30, 0.40625], [40, 0.3906]],
+        'CacheBlend-prefill+decode': [[10, 0.41406], [20, 0.42968], [30, 0.4765], [40, 0.4609]],
+        'KVShare-prefill (our)': [[10, 0.41406], [20, 0.45312], [30, 0.4375], [40, 0.4843]],
+        'KVShare-prefill+decode (our)': [[10, 0.46875], [20, 0.5390], [30, 0.49218], [40, 0.5515]],
+        'Naive': [[90, 0.3125]],
+        'FR': [[100, 0.6875]]
+    }
+    }, 
+    'Llama-3.1-8B': {
+     'GSM8K': {
+        'CacheBlend-prefill': [[10, 0.37], [20, 0.396], [30, 0.425], [40, 0.443]],
+        'CacheBlend-prefill+decode': [[10, 0.507], [20, 0.511], [30, 0.466], [40, 0.5019]],
+        'KVShare-prefill (our)': [[10, 0.335], [20, 0.357], [30,0.4023], [40, 0.4435]],
+        'KVShare-prefill+decode (our)': [[10, 0.558], [20, 0.53515], [30,0.58203], [40, 0.57013]],
+        'Naive': [[90, 0.337]],
+        'FR': [[100, 0.54492]]
+    },
+    'DROP': {
+        'CacheBlend-prefill': [[10, 0.453], [20, 0.5], [30, 0.578], [40, 0.5625]],
+        'CacheBlend-prefill+decode': [[10, 0.468], [20, 0.546], [30, 0.5781], [40, 0.5703]],
+        'KVShare-prefill (our)': [[10, 0.52], [20, 0.5625], [30,0.58593], [40, 0.6328]],
+        'KVShare-prefill+decode (our)': [[10, 0.5468], [20, 0.625], [30,0.664], [40, 0.6875]],
+        'Naive': [[90, 0.429]],
+        'FR': [[100, 0.7265]]
+    }
     }
 }
 
 # 颜色和标记样式 - 使用更明显的对比色
-colors = ['#ff5252', '#4285F4', '#34A853', '#7B1FA2']  # 红, 蓝, 绿, 紫
-markers = ['s', 'o', 'x', '^']
+colors = ['#ff5252', '#ff8a80', '#4285F4', '#82b1ff', '#7B1FA2', '#FFA000']  # 红, 浅红, 蓝, 浅蓝, 紫, 橙
+markers = ['s', 's', 'o', 'o', '^', 'D']  # 方形, 方形, 圆形, 圆形, 三角形, 菱形
 marker_size = 150  # 更大的标记尺寸
 line_width = 2.5   # 加粗的线条宽度
 
@@ -47,107 +73,113 @@ plt.rcParams.update({
     'grid.alpha': 0.7,
 })
 
-# 创建子图布局 - 只有两个子图
-fig, axs = plt.subplots(1, 2, figsize=(15, 6), dpi=100)
-axs = axs.flatten()
+# 创建子图布局 - 2x2布局
+fig, axs = plt.subplots(2, 2, figsize=(13, 10), dpi=100)
 
-# 为每个数据集绘制子图
-for i, dataset in enumerate(datasets):
-    ax = axs[i]
-    
-    # 设置y轴范围
-    if dataset == 'GSM8K':
-        ax.set_ylim(0.4, 0.9)  # 根据新数据调整范围
-        metric_name = 'acc'
-    else:  # SAMSum
-        ax.set_ylim(0.23, 0.28)  # 根据新数据调整范围
-        metric_name = 'Rouge-L-Score'
-    
-    # 设置x轴范围
-    ax.set_xlim(0, 105)  # 调整X轴范围
-    
-    # 绘制数据点
-    for j, method in enumerate(cache_methods):
-        if method in data[dataset]:
-            if method in ['CacheBlend', 'KVShare (our)']:
-                # 对于有多个数据点的方法，需要连线
-                points = data[dataset][method]
-                x_values = [point[0] for point in points]
-                y_values = [point[1] for point in points]
-                ax.plot(x_values, y_values, color=colors[j], marker=markers[j], 
-                       markersize=10, linewidth=line_width, alpha=0.9)
-                
-                # 添加数据点
-                for x, y in points:
-                    ax.scatter(x, y, color=colors[j], marker=markers[j], s=marker_size,
-                              edgecolors='black', linewidth=1.5, zorder=10)
-            else:
-                # 对于其他方法，只有单个数据点
-                x, y = data[dataset][method][0]
-                ax.scatter(x, y, color=colors[j], marker=markers[j], s=marker_size,
-                          edgecolors='black', linewidth=1.5, zorder=10)
-    
-    # 设置标题
-    ax.set_title(dataset, fontsize=20, fontweight='bold', pad=15)
-    
-    # 设置轴标签
-    if i == 0:
+# 在循环前加
+ylabels = {'GSM8K': 'Accuracy', 'DROP': 'EM Score'}
+
+# 为每个模型和数据集组合绘制子图
+for i, model in enumerate(models):
+    for j, dataset in enumerate(datasets):
+        ax = axs[i, j]
+        
+        # 设置y轴范围
         if dataset == 'GSM8K':
-            ax.set_ylabel('acc', fontsize=18, fontweight='bold')
-        else:
-            ax.set_ylabel(metric_name, fontsize=18, fontweight='bold')
-    
-    # 在每个子图底部添加x轴标签
-    ax.set_xlabel('Re-compute Ratio (%)', fontsize=16, fontweight='bold')
-    
-    # 设置刻度
-    ax.xaxis.set_major_locator(plt.MultipleLocator(25))  # 调整为每25个单位一个刻度
-    
-    if dataset == 'GSM8K':
-        ax.yaxis.set_major_locator(plt.MultipleLocator(0.1))
-        ax.set_yticks([0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
-    else:  # SAMSum
-        ax.yaxis.set_major_locator(plt.MultipleLocator(0.01))
-        ax.set_yticks([0.23, 0.24, 0.25, 0.26, 0.27, 0.28])
-    
-    # 美化刻度标签
-    ax.tick_params(axis='both', which='major', labelsize=12, width=1.5, length=6)
-    ax.tick_params(axis='both', which='minor', width=1, length=3)
-    
-    # 添加网格
-    ax.grid(True, linestyle='--', alpha=0.7, zorder=0)
-    
-    # 美化边框
-    for spine in ax.spines.values():
-        spine.set_linewidth(1.5)  # 增加边框粗细
+            ax.set_ylim(0.3, 0.9)
+        else:  # DROP
+            ax.set_ylim(0.3, 0.8)
+        
+        # 设置x轴范围
+        ax.set_xlim(0, 105)
+        
+        # 绘制数据点
+        for k, method in enumerate(cache_methods):
+            if method in data[model][dataset]:
+                if method in ['CacheBlend-prefill', 'CacheBlend-prefill+decode', 'KVShare-prefill (our)', 'KVShare-prefill+decode (our)']:
+                    # 对于有多个数据点的方法，需要连线
+                    points = data[model][dataset][method]
+                    x_values = [point[0] for point in points]
+                    y_values = [point[1] for point in points]
+                    ax.plot(x_values, y_values, color=colors[k], marker=markers[k], 
+                           markersize=10, linewidth=line_width, alpha=0.9)
+                    
+                    # 添加数据点
+                    for x, y in points:
+                        ax.scatter(x, y, color=colors[k], marker=markers[k], s=marker_size,
+                                  edgecolors='black', linewidth=1.5, zorder=10)
+                else:
+                    # 对于Naive和FR，只创建水平线
+                    x, y = data[model][dataset][method][0]
+                    # 创建从0到x的水平线
+                    ax.plot([0, x], [y, y], color=colors[k], linewidth=line_width, 
+                           alpha=0.9, linestyle='--')
+        
+        # 设置轴标签
+        if j == 0:  # 第一列
+            ax.set_ylabel(ylabels[dataset], fontsize=14, fontweight='bold')
+        
+        # 在每个子图底部添加x轴标签
+        if i == 1:  # 最后一行
+            ax.set_xlabel('Re-compute Ratio (%)', fontsize=14, fontweight='bold')
+        
+        # 设置刻度
+        ax.xaxis.set_major_locator(plt.MultipleLocator(25))
+        
+        if dataset == 'GSM8K':
+            ax.yaxis.set_major_locator(plt.MultipleLocator(0.1))
+        else:  # DROP
+            ax.yaxis.set_major_locator(plt.MultipleLocator(0.1))
+        
+        # 美化刻度标签
+        ax.tick_params(axis='both', which='major', labelsize=12, width=1.5, length=6)
+        ax.tick_params(axis='both', which='minor', width=1, length=3)
+        
+        # 添加网格
+        ax.grid(True, linestyle='--', alpha=0.7, zorder=0)
+        
+        # 美化边框
+        for spine in ax.spines.values():
+            spine.set_linewidth(1.5)
+
+# 设置列标题（模型名）
+for j, model in enumerate(models):
+    axs[0, j].set_title(model, fontsize=18, fontweight='bold', pad=15)
+
+# 设置行标签（数据集名）
+for i, dataset in enumerate(datasets):
+    # 在每行最左侧居中加标签
+    fig.text(0.01, 0.75-0.5*i, dataset, va='center', ha='center', rotation='vertical', fontsize=18, fontweight='bold')
 
 # 创建图例
 handles = []
 labels = []
 for i, method in enumerate(cache_methods):
-    if method in ['CacheBlend', 'KVShare (our)']:
+    if method in ['CacheBlend-prefill', 'CacheBlend-prefill+decode', 'KVShare-prefill (our)', 'KVShare-prefill+decode (our)']:
         handle = plt.Line2D([0], [0], color=colors[i], marker=markers[i], 
                            markersize=12, linewidth=line_width, 
                            markerfacecolor=colors[i], markeredgecolor='black')
     else:
-        handle = plt.Line2D([0], [0], marker=markers[i], color='w',
-                           markerfacecolor=colors[i], markersize=12, 
-                           markeredgecolor='black', markeredgewidth=1.5)
+        # Naive 和 FR 用虚线线条，不加marker
+        handle = plt.Line2D([0], [0], color=colors[i], linestyle='--',
+                            linewidth=line_width)
     handles.append(handle)
     labels.append(method)
 
-# 将图例放在图表顶部
-leg = fig.legend(handles=handles, labels=labels, loc='upper center', 
-           bbox_to_anchor=(0.5, 1.15), ncol=len(cache_methods),
-           fontsize=14, frameon=True, framealpha=0.95,
-           handletextpad=0.5, columnspacing=1.5, 
-           fancybox=True, shadow=True)
-
-# 美化图例
+# 将图例放在图的最上方
+leg = fig.legend(
+    handles=handles, labels=labels,
+    loc='upper center',
+    bbox_to_anchor=(0.5, 1.02),  # 横向居中，纵向略高于图
+    ncol=len(cache_methods),      # 横向一行展示
+    fontsize=14, frameon=True, framealpha=0.95,
+    handletextpad=0.5, columnspacing=1.5,
+    fancybox=True, shadow=True
+)
 leg.get_frame().set_linewidth(2)
 
-# 调整子图间距
-plt.subplots_adjust(wspace=0.25, hspace=0.3, top=0.80, bottom=0.15, left=0.08, right=0.95)
+# 调整子图间距，给顶部留出空间
+plt.subplots_adjust(wspace=0.25, hspace=0.25, top=0.88, bottom=0.10, left=0.08, right=0.95)
 
 # 保存高分辨率图表
 plt.savefig('acc_ratio.png', dpi=300, bbox_inches='tight', pad_inches=0.2)

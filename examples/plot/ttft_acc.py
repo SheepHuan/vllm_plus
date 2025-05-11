@@ -10,44 +10,42 @@ import matplotlib.ticker as ticker
 
 # 示例数据结构 - 请替换为你的实际数据
 models = ['Qwen2.5-72B', 'Llama3.1-8B']
-datasets = ['GSM8K', 'SAMSum',]
-metrics = ['acc', 'rougeL']
+datasets = ['GSM8K', 'SAMSum','TREC','musique']
+metrics = ['acc', 'rougeL','F1-score','F1-score']
 
 # 每个模型、数据集和缓存方法的数据点
 # 格式: [x, y] 代表 [TTFT(s), 分数]
 data = {
-    'Qwen2.5-72B': {
-        'GSM8K': {
-            'CacheBlend': [0.1487, 0.7734],
-            'KVShare': [0.156, 0.7978],
-            'Naive': [0.12, 0.4609],
-            'Full KV recompute': [0.2938, 0.8593]
-        },
-        'SAMSum': {
-            'CacheBlend': [0.1487, 0.249],
-            'KVShare': [0.156, 0.253],
-            'Naive': [0.12, 0.208],
-            'Full KV recompute': [0.2938, 0.267]
-        },
-    },
     'Llama3.1-8B': {
         'GSM8K': {
-            'CacheBlend': [0.1487, 0.703],
-            'KVShare': [0.156, 0.774],
-            'Naive': [0.12, 0.1398],
-            'Full KV recompute': [0.2938, 0.8359]
+            'CacheBlend': [0.1487,39.6],
+            'KVShare': [0.156, 39.6],
+            'Naive': [0.12, 33.7],
+            'FR': [0.2938,  54.5]
         },
         'SAMSum': {
-            'CacheBlend': [0.1487, 0.249],
-            'KVShare': [0.156, 0.253],
+            'CacheBlend': [0.1487, 40.43],
+            'KVShare': [0.156, 41.07],
             'Naive': [0.12, 0.208],
             'Full KV recompute': [0.2938, 0.267]
         },
+        'TREC': {
+            'CacheBlend': [0.1487, 66.5],
+            'KVShare': [0.156, 68.0],
+            'Naive': [0.12, 46.0],
+            'Full KV recompute': [0.2938, 85.9]
+        },
+        'musique': {
+            'CacheBlend': [0.1487, 10.77],
+            'KVShare': [0.156, 15.18],
+            'Naive': [0.12, 10.77],
+            'Full KV recompute': [0.2938, 15.18]
+        }
     }
 }
 
 # 绘图设置
-cache_methods = ['CacheBlend', 'KVShare', 'Naive', 'Full KV recompute']
+cache_methods = ['CacheBlend-20', 'KVShare-20', 'Naive', 'FR']
 colors = ['red', 'orange', 'deepskyblue', 'navy']  # 增加对比度
 markers = ['s', '*', 'o', '^']
 marker_size = 140  # 进一步增大数据点大小
