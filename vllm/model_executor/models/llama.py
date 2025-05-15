@@ -410,6 +410,7 @@ class LlamaModel(nn.Module):
             "las_top_ratio":0.85,
             "has_top_ratio":0.15,
             "fake_q":None,
+            "enable_epic":False,
             }       
         self.old_kvs = [[None,None]] * len(self.layers)  
 

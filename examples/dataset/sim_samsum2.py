@@ -8,18 +8,18 @@ from tqdm import tqdm
 
 def load_samsum(max_num=256):
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
-    dataset = json.load(open("examples/dataset/data/samsum/train.json")) + json.load(open("examples/dataset/data/samsum/test.json"))
+    dataset = json.load(open("examples/dataset/data/samsum/train.json"))
     data = []
     # dataset = random.sample(dataset,max_num)
     for item in dataset:
         tokens = tokenizer.encode(item["dialogue"])
-        if len(tokens) <= 256 or len(tokens) >= 512:
+        if len(tokens) <= 256 or len(tokens) >= 2048:
             continue
         data.append(
             {
                 "answer": item["summary"],
-                "target_doc": item["dialogue"],
-                "candidate_doc": item["dialogue"]
+                "target_doc": item["dialogue"] + " \n " + "Please summarize the main content of the following text. The summary should be concise and clear, and key information should be retained. ",
+                "candidate_doc": item["dialogue"] + " \n " + "Please summarize the main content of the following text. The summary should be concise and clear, and key information should be retained. "
             }
         )
     data = random.sample(data,max_num)
@@ -87,33 +87,64 @@ def random_split_chunks(text: str, chunk_size: int) -> list:
     List[str] 分块后的文本列表
     """
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
-    tokens = tokenizer.encode(text)
     
     # 按chunk_size分块
-    chunks = []
-    for i in range(0, len(tokens), chunk_size):
-        chunks.append(tokens[i:i+chunk_size])
+    nlp = spacy.load('en_core_web_sm')  # 加载英文模型
+    doc = nlp(text)
+    sentences = [sent.text for sent in doc.sents]
+    
+    # 检查每个句子的token长度并合并
+    merged_sentences = []
+    current_chunk = ""
+    
+    for i, sent in enumerate(sentences):
+        current_sent_tokens = tokenizer.encode(sent)
+        
+        if len(current_sent_tokens) < 10:
+            # 如果当前句子token数小于10，尝试与下一个句子合并
+            if i < len(sentences) - 1:
+                next_sent = sentences[i + 1]
+                combined_tokens = tokenizer.encode(sent + " " + next_sent)
+                if len(combined_tokens) > 10:
+                    current_chunk = sent + " " + next_sent
+                    sentences[i + 1] = current_chunk  # 更新下一个句子
+                    continue
+            # 如果没有下一个句子或合并后仍小于10，与当前chunk合并
+            if current_chunk:
+                current_chunk += " " + sent
+            else:
+                current_chunk = sent
+        else:
+            # 如果当前句子token数大于等于10
+            if current_chunk:
+                merged_sentences.append(current_chunk)
+                current_chunk = ""
+            merged_sentences.append(sent)
     
     # 处理最后一个chunk
-    if len(chunks) > 1 and len(chunks[-1]) < chunk_size:
-        # 如果最后一个chunk不足chunk_size且存在前一个chunk，则合并到前一个chunk
-        chunks[-2].extend(chunks.pop())
+    if current_chunk:
+        merged_sentences.append(current_chunk)
     
-    # 将每个chunk的tokens解码为字符串
-    return [tokenizer.decode(chunk) for chunk in chunks]
+    # 去重，保持顺序
+    seen = set()
+    merged_sentences = [x for x in merged_sentences if not (x in seen or seen.add(x))]
+    
+    # 添加分隔符
+    merged_sentences = [" \n\n\n\n\n\n\n\n\n\n\n\n\n\n " + item + " \n\n\n\n\n\n\n\n\n\n\n\n\n\n " for item in merged_sentences]
+    return merged_sentences
     
     
 
 
 def chunk_data(data,chunk_size=96):
     for item in data:
-        chunk_tokens = random_split_chunks(item["candidate_doc"],chunk_size) + [ "Please summarize the main content of the following text. The summary should be concise and clear, and key information should be retained. "]
-        item["candidates"] = [" \n \n \n \n \n \n \n \n \n "+chunk+" \n \n \n \n \n \n \n \n \n " for chunk in chunk_tokens]
-        item["target_doc"] = item["target_doc"] + " \n " +  "Please summarize the main content of the following text. The summary should be concise and clear, and key information should be retained. "
+        chunk_tokens = random_split_chunks(item["candidate_doc"],chunk_size) + [ "Please summarize the main content of the above text. The summary should be concise and clear, and key information should be retained. "]
+        item["candidates"] = [" \n\n\n\n\n\n\n\n\n "+chunk+" \n\n\n\n\n\n\n\n\n " for chunk in chunk_tokens]
+        item["target_doc"] = item["target_doc"] + " \n " +  "Please summarize the main content of the above text. The summary should be concise and clear, and key information should be retained. "
     return data
 
 if __name__ == "__main__":
-    load_samsum()
+    # load_samsum()
     # data = json.load(open("examples/dataset/data/samsum/sim_samsum_benchmark_dataset.json","r",encoding="utf-8"))
     # with multiprocessing.Pool(processes=16) as pool:
     #     data = list(tqdm(pool.imap(process_item, data), total=len(data)))

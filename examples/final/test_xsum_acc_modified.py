@@ -84,6 +84,7 @@ Summarize and condense the following text into a short single sentence.\n{text}<
         
     def generate_with_partial_compute(self,pipeline:KVShareNewPipeline,input_path,output_path,kvcache_save_dir,batch_size=8,
                                     enable_kvshare=False,
+                                    enable_epic=False,
                                     enable_cacheblend=False,
                                     enable_only_compute_unreused=False,
                                     has_additional_value_error = False,
@@ -99,20 +100,7 @@ Summarize and condense the following text into a short single sentence.\n{text}<
         save_data = []
         os.makedirs(kvcache_save_dir,exist_ok=True)
         
-        # # 准备批处理数据
-        # batch_items = []
-
-        
-        # # 收集需要处理的数据
-        # for item in tqdm(data["targets"], desc="收集待处理数据"):
-        #     batch_items.append(item)
-        
-        # # 加载候选数据
-        # candidates_kvcache = json.load(open(input_path))["candidates"]
-        # if not batch_items:
-        #     print("没有需要处理的新数据")
-        #     return
-        
+    
         sample_params = SamplingParams(
             max_tokens=max_tokens,
             temperature=0.0,
@@ -175,7 +163,8 @@ Summarize and condense the following text into a short single sentence.\n{text}<
                 enable_kvshare_decode=enable_kvshare_decode,
                 cacheblend_recomp_ratio = cacheblend_recomp_ratio,
                 has_top_ratio = has_top_ratio,
-                enable_cacheblend_decode=enable_cacheblend_decode
+                enable_cacheblend_decode=enable_cacheblend_decode,
+                enable_epic=enable_epic
             )
             max_request_id = max([int(pc_outputs.request_id) for pc_outputs in batch_pc_outputs])+1
             for sub_batch_idx,output in enumerate(batch_pc_outputs):
@@ -219,6 +208,23 @@ Summarize and condense the following text into a short single sentence.\n{text}<
                 enable_cacheblend_decode=enable_cacheblend_decode,
                 cacheblend_recomp_ratio=cacheblend_recomp_ratio,
                 max_tokens=max_tokens)
+        
+    def generate_with_epic(self,pipeline:KVShareNewPipeline,input_path,output_path,kvcache_path,batch_size=8,
+                                 cacheblend_recomp_ratio=0.15,
+                                 enable_cacheblend_decode=False,
+                                 max_tokens=512):
+        self.generate_with_partial_compute(pipeline,input_path,output_path,kvcache_path,batch_size=batch_size,
+                enable_kvshare=False,
+                enable_cacheblend= False ,
+                enable_epic=True,
+                enable_only_compute_unreused=False,
+                has_additional_value_error = False,
+                las_additional_value_error = False,
+                enable_compute_as=False,
+                enable_cacheblend_decode=enable_cacheblend_decode,
+                cacheblend_recomp_ratio=cacheblend_recomp_ratio,
+                max_tokens=max_tokens)
+        
     
     def generate_with_only_compute_unreused(self,pipeline:KVShareNewPipeline,input_path,output_path,kvcache_path,batch_size=8,max_tokens=512):
         self.generate_with_partial_compute(pipeline,input_path,output_path,kvcache_path,batch_size=batch_size,

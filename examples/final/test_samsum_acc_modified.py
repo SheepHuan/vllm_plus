@@ -30,30 +30,29 @@ from test_xsum_acc_modified import BenchmarkTest
 
 class SAMSumBenchmarkTest(BenchmarkTest):
     
-    TEMPLATE ={
-        "Qwen/Qwen2.5-1.5B-Instruct":
-            """<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant. <|im_end|>\n
-        <|im_start|>user\nText: {text}\n Please summarize the above information in the shortest text possible.<|im_end|>\n<|im_start|>assistant\n""",
-        "Qwen/Qwen2.5-7B-Instruct": 
-            """<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant. <|im_end|>\n
-        <|im_start|>user\nText: {text}\n Please summarize the above information in the shortest text possible.<|im_end|>\n<|im_start|>assistant\n""",
-        "LLM-Research/Meta-Llama-3.1-8B-Instruct":
-        """<|begin_of_text|><|start_header_id|>system<|end_header_id|>You are a helpful AI assistant.<|eot_id|><|start_header_id|>user<|end_header_id|>\nText: {text}\n Please summarize the above information in the shortest text possible.<|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
-        "01ai/Yi-34B-Chat-4bits":
-            """<|im_start|>system\nYou are a helpful assistant. <|im_end|>\n<|im_start|>user\nText: {text}\n Please summarize the above information in the shortest text possible.<|im_end|>\n<|im_start|>assistant\n""",
-    }
+    # TEMPLATE ={
+    #     "Qwen/Qwen2.5-1.5B-Instruct":
+    #         """<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant. <|im_end|>\n
+    #     <|im_start|>user\nText: {text}\n Please summarize the above information in the shortest text possible.<|im_end|>\n<|im_start|>assistant\n""",
+    #     "Qwen/Qwen2.5-7B-Instruct": 
+    #         """<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant. <|im_end|>\n
+    #     <|im_start|>user\nText: {text}\n Please summarize the above information in the shortest text possible.<|im_end|>\n<|im_start|>assistant\n""",
+    #     "LLM-Research/Meta-Llama-3.1-8B-Instruct":
+    #     """<|begin_of_text|><|start_header_id|>system<|end_header_id|>You are a helpful AI assistant.<|eot_id|><|start_header_id|>user<|end_header_id|>\nText: {text}\n Please summarize the above information in the shortest text possible.<|eot_id|><|start_header_id|>assistant<|end_header_id|>""",
+    #     "01ai/Yi-34B-Chat-4bits":
+    #         """<|im_start|>system\nYou are a helpful assistant. <|im_end|>\n<|im_start|>user\nText: {text}\n Please summarize the above information in the shortest text possible.<|im_end|>\n<|im_start|>assistant\n""",
+    # }
     def __init__(self,model_name):
         super().__init__(model_name)
         self.model_name = model_name
         self.metric = load("rouge")
-        self.template = self.TEMPLATE[model_name]
+        # self.template = self.TEMPLATE[model_name]
     
     def compute_metric(self,pred_output,target_output):
         return self.metric.compute(predictions=[pred_output],references=[target_output])["rougeL"]
     
     
 
-    
         
         
         
@@ -64,8 +63,8 @@ if __name__ == "__main__":
     os.environ["VLLM_USE_MODELSCOPE"]="True"
 
     # model_name = "Qwen/Qwen2.5-7B-Instruct"
-    # model_name = "01ai/Yi-34B-Chat-4bits"
-    model_name = "LLM-Research/Meta-Llama-3.1-8B-Instruct"
+    model_name = "01ai/Yi-1.5-9B-Chat-16K"
+    # model_name = "LLM-Research/Meta-Llama-3.1-8B-Instruct"
     batch_size = 16
     max_model_len = 8192
     
@@ -76,22 +75,29 @@ if __name__ == "__main__":
     benchmark_opus_full_compute = "examples/dataset/data/samsum/samsum_benchmark_full_compute.json"
     benchmark_opus_kvshare = "examples/dataset/data/samsum/samsum_benchmark_kvshare.json"
     benchmark_opus_only_compute_unreused = "examples/dataset/data/samsum/samsum_benchmark_only_compute_unreused.json"
-    pipeline = KVShareNewPipeline(model_name,max_model_len=4096)
+    benchmark_opus_epic = "examples/dataset/data/samsum/samsum_benchmark_epic.json"
+    pipeline = KVShareNewPipeline(model_name)
     benchmark_test = SAMSumBenchmarkTest(model_name)
     # print(pipeline.model.get_tokenizer().encode("\n\n\n\n"))
-    # benchmark_test.generate_kvcache(pipeline, benchmark_opus, benchmark_opus_with_kvcache, kvcache_path,batch_size=16)
+    # benchmark_test.generate_kvcache(pipeline, benchmark_opus, benchmark_opus_with_kvcache, kvcache_path,batch_size=32)
     
-    benchmark_test.generate_full_compute(pipeline, benchmark_opus, benchmark_opus_full_compute,batch_size=16)
+    # benchmark_test.generate_full_compute(pipeline, benchmark_opus, benchmark_opus_full_compute,batch_size=32,max_tokens=128)
     
     # benchmark_test.generate_with_cacheblend(
-    #     pipeline, benchmark_opus_with_kvcache, benchmark_opus_cacheblend, kvcache_path,batch_size=32,
-    #     cacheblend_recomp_ratio=0.30,enable_cacheblend_decode=False
+    #     pipeline, benchmark_opus_with_kvcache, benchmark_opus_cacheblend, kvcache_path,batch_size=48,
+    #     cacheblend_recomp_ratio=0.1,enable_cacheblend_decode=False,max_tokens=128
     # ) 
     # benchmark_test.generate_with_kvshare(
     #     pipeline, benchmark_opus_with_kvcache, benchmark_opus_kvshare, kvcache_path,batch_size=32,
     #     enable_kvshare_decode=False,
-    #     has_top_ratio=0.20
+    #     has_top_ratio=0.1,max_tokens=128
     # ) 
-    # benchmark_test.generate_with_only_compute_unreused(
-    #     pipeline, benchmark_opus_with_kvcache, benchmark_opus_only_compute_unreused, kvcache_path,batch_size=8
+    benchmark_test.generate_with_only_compute_unreused(
+        pipeline, benchmark_opus_with_kvcache, benchmark_opus_only_compute_unreused, kvcache_path,batch_size=32
+    ) 
+    
+    # benchmark_test.generate_with_epic(
+    #     pipeline, benchmark_opus_with_kvcache, benchmark_opus_epic, kvcache_path,batch_size=32,   
+    #     cacheblend_recomp_ratio=0.40,
+    #     enable_cacheblend_decode=False,max_tokens=128
     # ) 

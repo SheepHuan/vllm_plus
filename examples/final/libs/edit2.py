@@ -675,7 +675,7 @@ if __name__=="__main__":
     # test kvedit_v2
     a = "\n A whirligig spins at five times the speed of a thingamabob. A whatchamacallit spins eleven times faster than a thingamabob. A whatchamacallit spins at 121 meters per second. How fast does a whirligig spin? \n"
     b = [
-         "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n A whirligig spins at five times the speed of a thingamabob.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n A whatchamacallit spins eleven times faster than a thingamabob.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n A whatchamacallit spins at 121 meters per second.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n How fast does a whirligig spin?\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n "
+         "\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n A whirligig spins at five times the speed of a thingamabob.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n "
     ]
     tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-7B-Instruct")
     a_token_ids = tokenizer.encode(a)

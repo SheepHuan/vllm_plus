@@ -171,6 +171,8 @@ class Qwen2Attention(nn.Module):
         # self.hack_cross_attn = None
         
         # self.hack_kv_forward_attn = []
+        
+        self.hack_qkv = []
 
     def forward(
         self,
@@ -196,11 +198,13 @@ class Qwen2Attention(nn.Module):
                 else:
                     key_old = old_kv[0]
                     value_old = old_kv[1]
+                    # just for profile
                     self.hack_kv = [key_old,value_old]
             else:
                 # NOTE VLLM在批处理的时候可能会循环调用这个
                 
                 self.hack_kv = [k.clone(),v.clone()]
+                self.hack_qkv = [q.clone(),k.clone(),v.clone()]
                 # self.hack_attn = [attn_metadata.clone()]
             
         if status in [1,2]:
@@ -411,7 +415,7 @@ class Qwen2Model(nn.Module):
             "las_additional_value_error":False,
 
             "enable_compute_as": False,
-
+            "enable_epic": False,
             "prefill_atten_bias":None,
             "decode_atten_bias":None,
             "has_token_indices":None,

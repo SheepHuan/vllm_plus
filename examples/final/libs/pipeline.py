@@ -79,6 +79,8 @@ class KVShareNewPipeline:
             batch_kvcache.append(past_key_values)
         # batch_kvcache = torch.concat(batch_kvcache,dim=2)    
         return batch_kvcache,output,keys
+    
+    
         
     @staticmethod
     def find_texts_differences(source_token_ids:List[int],target_token_ids:List[int]):

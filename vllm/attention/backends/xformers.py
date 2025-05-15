@@ -606,6 +606,62 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     
                     cache_fuse_metadata["prefill_atten_bias"] = attn_bias
                     attn_metadata.prefill_metadata.attn_bias=None
+                    
+                elif cache_fuse_metadata["enable_epic"]:
+                    last_token_indices = cache_fuse_metadata["batch_seq_start_loc"][1:]-1
+                    old_kv_map_indices =torch.sort(cache_fuse_metadata["old_kv_map_indices"])[0]
+                    
+                    
+                    batch_top_indices = []
+                    batch_bottom_indices = []
+                    # 处理子序列，每个序列是一个独立的请求
+                    for idx,start_loc in enumerate(cache_fuse_metadata["batch_seq_start_loc"][:-1]):
+                        end_loc= last_token_indices[idx]+1
+                        sub_reused_position = torch.where(torch.logical_and(old_kv_map_indices>=start_loc,old_kv_map_indices<=end_loc))[0]
+                        
+                        
+                        
+    
+                        topk_num = max(1,int(cache_fuse_metadata["recomp_ratio"]*len(sub_reused_position)))
+                        bottomk_num = max(1,int((1-cache_fuse_metadata["recomp_ratio"])*len(sub_reused_position)))
+                        
+                     
+                        topk_indices = sub_reused_position[:topk_num]
+                        bottomk_indices = sub_reused_position[topk_num:]
+                    
+                        
+                        batch_top_indices.extend(topk_indices)
+                        batch_bottom_indices.extend(bottomk_indices)
+                        
+                        
+                        
+                    batch_top_indices = torch.tensor(batch_top_indices,device=query.device,dtype=torch.long)
+                    batch_bottom_indices = torch.tensor(batch_bottom_indices,device=query.device,dtype=torch.long)
+                    cache_fuse_metadata["has_token_indices"] = batch_top_indices
+                    cache_fuse_metadata["las_token_indices"] = batch_bottom_indices
+                    
+                    
+                    top_indices = torch.cat([old_kv_map_indices[batch_top_indices],cache_fuse_metadata["additional_map_indices"],last_token_indices])
+                    top_indices = torch.unique(top_indices)
+                    top_indices,_ = torch.sort(top_indices)
+                    cache_fuse_metadata["imp_indices"] = top_indices
+                    
+                    
+                    positions = torch.tensor([torch.where(top_indices == idx)[0][0].item() for idx in last_token_indices], 
+                                           device=query.device, dtype=torch.long)
+
+                    cache_fuse_metadata["selected_token_indices"] = positions
+                    
+                    query = query[top_indices,:,:]
+                    # attn_bias = LowerTriangularFromBottomRightMask()
+                    attn_bias = torch.zeros(1,query.shape[0],old_kv[0].shape[0],device=query.device,dtype=torch.bool)
+                    for idx,index in enumerate(top_indices):
+                        for i in range(len(cache_fuse_metadata["batch_seq_start_loc"])-1):
+                            if index >= cache_fuse_metadata["batch_seq_start_loc"][i] and index < cache_fuse_metadata["batch_seq_start_loc"][i+1]:
+                                attn_bias[:,idx,cache_fuse_metadata["batch_seq_start_loc"][i]:index+1] = 1
+                    
+                    cache_fuse_metadata["prefill_atten_bias"] = attn_bias
+                    attn_metadata.prefill_metadata.attn_bias=None
                 elif cache_fuse_metadata["enable_kvshare"]:
                     def repeat_kv(cache,num_repeat):
                         """
@@ -850,7 +906,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         else:
             num_prefill_tokens = attn_metadata.num_prefill_tokens
             num_decode_tokens = attn_metadata.num_decode_tokens
-            if (cache_fuse_metadata["enable_kvshare"] or cache_fuse_metadata["enable_cacheblend"])  and attn_metadata.decode_metadata:
+            if (cache_fuse_metadata["enable_kvshare"] or cache_fuse_metadata["enable_cacheblend"] or cache_fuse_metadata["enable_epic"])  and attn_metadata.decode_metadata:
                 # num_decode_tokens = 0
                 pass
             else:
@@ -864,7 +920,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             query = query[:num_prefill_tokens]
             key = key[:num_prefill_tokens]
             value = value[:num_prefill_tokens]
-            if (cache_fuse_metadata["enable_kvshare"] or cache_fuse_metadata["enable_cacheblend"]) and attn_metadata.decode_metadata:
+            if (cache_fuse_metadata["enable_kvshare"] or cache_fuse_metadata["enable_cacheblend"] or cache_fuse_metadata["enable_epic"]) and attn_metadata.decode_metadata:
                 # num_decode_tokens = 0
                 pass
             else:
